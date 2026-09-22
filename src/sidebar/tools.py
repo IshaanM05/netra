@@ -7,8 +7,11 @@ Tools use the flat schema format: {type, name, description, parameters}.
 import json
 import math
 import re
+import os
+import time
 
 import httpx
+from .sight import TOOL_DEFINITIONS as SIGHT_TOOL_DEFINITIONS
 
 TOOL_DEFINITIONS = [
     {
@@ -71,6 +74,16 @@ TOOL_DEFINITIONS = [
     },
 ]
 
+TOOL_DEFINITIONS = TOOL_DEFINITIONS + SIGHT_TOOL_DEFINITIONS + [{
+    "type": "function", "name": "search_live",
+    "description": "Search the live web for current information or trusted service documentation.",
+    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+}, {
+    "type": "function", "name": "scrape_live",
+    "description": "Fetch and extract useful content from a specific public HTTP or HTTPS URL using Anakin.io.",
+    "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+}]
+
 
 _SAFE_MATH = {
     "sqrt": math.sqrt,
@@ -89,7 +102,7 @@ _SAFE_MATH = {
 }
 
 
-def execute_tool(name: str, arguments: str) -> str:
+def execute_tool(name: str, arguments: str, sight=None) -> str:
     try:
         if isinstance(arguments, dict):
             args = arguments
@@ -99,6 +112,15 @@ def execute_tool(name: str, arguments: str) -> str:
             args = {}
     except json.JSONDecodeError:
         return f"Error: invalid arguments JSON: {arguments}"
+
+    if name in {"locate", "point", "expand", "describe", "walk_through"}:
+        if sight is None:
+            return "No visual adapter is active. Configure NETRA_SIGHT=model or screen."
+        return sight.act(name, args)
+    if name == "search_live":
+        return _search_live(args.get("query", ""))
+    if name == "scrape_live":
+        return _scrape_live(args.get("url", ""))
 
     if name == "calculate":
         return _calculate(args.get("expression", ""))
@@ -171,3 +193,80 @@ def _define_word(word: str) -> str:
         return f"Could not find a definition for '{word}'."
     except Exception as e:
         return f"Error looking up '{word}': {e}"
+
+
+def _search_live(query: str) -> str:
+    """Search Anakin.io's synchronous web search endpoint."""
+    query = str(query).strip()
+    api_key = os.environ.get("ANAKIN_API_KEY", "").strip()
+    if not query:
+        return "Error: no search query provided."
+    if not api_key:
+        return "Live web search is unavailable: set ANAKIN_API_KEY to enable Anakin.io search."
+    try:
+        response = httpx.post(
+            "https://api.anakin.io/v1/search",
+            headers={"X-API-Key": api_key},
+            json={"prompt": query, "limit": 5},
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        results = payload.get("results", [])
+        if not results:
+            return "No live search results were found."
+        return json.dumps(results[:5], ensure_ascii=False)
+    except (httpx.HTTPError, ValueError) as exc:
+        return f"Live search failed: {exc}"
+
+
+def _scrape_live(url: str) -> str:
+    """Fetch a single page through Anakin.io's inline URL scraper."""
+    from urllib.parse import urlparse
+
+    url = str(url).strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "Error: provide a complete http:// or https:// URL."
+    api_key = os.environ.get("ANAKIN_API_KEY", "").strip()
+    if not api_key:
+        return "Live URL scraping is unavailable: set ANAKIN_API_KEY to enable Anakin.io scraping."
+    try:
+        response = httpx.post(
+            "https://api.anakin.io/v1/url-scraper/scrape",
+            headers={"X-API-Key": api_key},
+            json={"url": url, "formats": ["markdown"]},
+            timeout=httpx.Timeout(90, connect=10),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        status = payload.get("status")
+        job_id = payload.get("id") or payload.get("jobId")
+        if status == "failed":
+            return f"Live URL scrape failed: {payload.get('error') or 'Anakin.io reported a failed scrape.'}"
+        if status in {"pending", "processing"} and job_id:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                time.sleep(1)
+                poll = httpx.get(
+                    f"https://api.anakin.io/v1/url-scraper/{job_id}",
+                    headers={"X-API-Key": api_key},
+                    timeout=httpx.Timeout(10, connect=5),
+                )
+                poll.raise_for_status()
+                payload = poll.json()
+                status = payload.get("status")
+                if status == "failed":
+                    return f"Live URL scrape failed: {payload.get('error') or 'Anakin.io reported a failed scrape.'}"
+                if status == "completed":
+                    break
+            else:
+                return f"The page is still being scraped by Anakin.io (job {job_id}); try again shortly."
+        elif status not in (None, "completed"):
+            return f"Anakin.io returned an unrecognized scrape status: {status}."
+        content = payload.get("markdown") or payload.get("content") or ""
+        if not content:
+            return "Anakin.io completed the scrape but returned no markdown content."
+        return json.dumps({"url": url, "markdown": str(content)[:12000]}, ensure_ascii=False)
+    except (httpx.HTTPError, ValueError) as exc:
+        return f"Live URL scrape failed: {exc}"

@@ -125,6 +125,8 @@ async def send_and_wait(ws, query: str) -> dict:
 
     # Now collect events until reply.done
     tool_calls = []
+    pending_tool_results = []
+    tool_result_sent = False
     heard = ""
     agent_text = ""
     deadline = asyncio.get_event_loop().time() + 20
@@ -147,14 +149,26 @@ async def send_and_wait(ws, query: str) -> dict:
             name = msg.get("name", "")
             args = msg.get("arguments", "{}")
             tool_calls.append(name)
-            result = execute_tool(name, args)
-            await ws.send(json.dumps({
-                "type": "tool.result", "call_id": call_id, "result": result,
-            }))
+            result = await asyncio.to_thread(execute_tool, name, args)
+            pending_tool_results.append((call_id, result))
+            tool_result_sent = False
         elif t == "transcript.agent":
             agent_text = msg.get("text", "")
         elif t == "reply.done":
-            break
+            if msg.get("status") == "interrupted":
+                pending_tool_results.clear()
+                break
+            if pending_tool_results:
+                for call_id, result in pending_tool_results:
+                    await ws.send(json.dumps({
+                        "type": "tool.result",
+                        "call_id": call_id,
+                        "result": json.dumps({"result": result}),
+                    }))
+                pending_tool_results.clear()
+                tool_result_sent = True
+            elif tool_result_sent or not tool_calls:
+                break
 
     # Drain any trailing audio events
     await drain_events(ws, timeout=1.0)

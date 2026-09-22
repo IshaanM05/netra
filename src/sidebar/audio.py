@@ -21,6 +21,7 @@ class AudioIO:
     def __init__(self):
         self._streaming_subscribers: list[asyncio.Queue] = []
         self._agent_subscribers: list[asyncio.Queue] = []
+        self._subscriber_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
         self._playback_stream: sd.OutputStream | None = None
@@ -32,13 +33,34 @@ class AudioIO:
 
     def subscribe_streaming(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=100)
-        self._streaming_subscribers.append(q)
+        with self._subscriber_lock:
+            self._streaming_subscribers.append(q)
         return q
 
     def subscribe_agent(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=100)
-        self._agent_subscribers.append(q)
+        with self._subscriber_lock:
+            self._agent_subscribers.append(q)
         return q
+
+    def unsubscribe_agent(self, queue: asyncio.Queue):
+        with self._subscriber_lock:
+            if queue in self._agent_subscribers:
+                self._agent_subscribers.remove(queue)
+
+    @staticmethod
+    def _enqueue(queue: asyncio.Queue, item):
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
+
+    def _offer(self, queue: asyncio.Queue, item):
+        if self._loop and not self._loop.is_closed():
+            try:
+                self._loop.call_soon_threadsafe(self._enqueue, queue, item)
+            except RuntimeError:
+                pass
 
     def _is_echo_suppressed(self) -> bool:
         if self._agent_speaking:
@@ -51,20 +73,19 @@ class AudioIO:
 
         pcm16 = indata.copy()
 
-        for q in self._streaming_subscribers:
-            try:
-                q.put_nowait(pcm16.tobytes())
-            except asyncio.QueueFull:
-                pass
+        with self._subscriber_lock:
+            streaming_subscribers = tuple(self._streaming_subscribers)
+            agent_subscribers = tuple(self._agent_subscribers)
+
+        raw_pcm = pcm16.tobytes()
+        for q in streaming_subscribers:
+            self._offer(q, raw_pcm)
 
         if not self._is_echo_suppressed():
             resampled = self._resample_16k_to_24k(pcm16)
             b64 = base64.b64encode(resampled).decode("ascii")
-            for q in self._agent_subscribers:
-                try:
-                    q.put_nowait(b64)
-                except asyncio.QueueFull:
-                    pass
+            for q in agent_subscribers:
+                self._offer(q, b64)
 
     @staticmethod
     def _resample_16k_to_24k(pcm16_bytes: np.ndarray) -> bytes:

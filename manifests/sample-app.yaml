@@ -1,0 +1,14 @@
+manifest:
+  domain: screen_app
+  name: Figma
+  vocab:
+    - term: artboard
+      meaning: A frame or canvas containing the design layout.
+    - term: layers panel
+      meaning: The left-side panel that lists objects and frames in the current file.
+  procedures:
+    - name: export selected frame
+      steps:
+        - Select the frame in the layers panel or on the canvas.
+        - Open the export section in the design properties panel.
+        - Choose the required format and select Export.

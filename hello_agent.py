@@ -66,15 +66,10 @@ SESSION_CONFIG = {
 }
 
 
-async def handle_tool_call(ws, call_id: str, name: str, arguments: str):
+def handle_tool_call(call_id: str, name: str, arguments):
     print(f"  [tool call] {name}({arguments})")
     result = f"Sorry, {name} is not implemented yet in this hello-world demo."
-    await ws.send(json.dumps({
-        "type": "tool.result",
-        "call_id": call_id,
-        "result": result,
-    }))
-    print(f"  [tool result sent]")
+    return call_id, result
 
 
 async def send_audio(ws, stop_event: asyncio.Event):
@@ -101,6 +96,7 @@ async def send_audio(ws, stop_event: asyncio.Event):
 
 
 async def receive_messages(ws, stop_event: asyncio.Event):
+    pending_tool_results = []
     playback_stream = sd.OutputStream(
         samplerate=SAMPLE_RATE_OUT,
         channels=1,
@@ -146,14 +142,25 @@ async def receive_messages(ws, stop_event: asyncio.Event):
                 status = msg.get("status", "")
                 if status == "interrupted":
                     print("  [interrupted by user]")
+                    pending_tool_results.clear()
+                else:
+                    for call_id, result in pending_tool_results:
+                        await ws.send(json.dumps({
+                            "type": "tool.result",
+                            "call_id": call_id,
+                            "result": json.dumps({"result": result}),
+                        }))
+                    if pending_tool_results:
+                        print("  [tool results sent]")
+                    pending_tool_results.clear()
 
             elif msg_type == "tool.call":
                 call_id = msg.get("call_id", "")
                 name = msg.get("name", "")
                 arguments = msg.get("arguments", "{}")
-                await handle_tool_call(ws, call_id, name, arguments)
+                pending_tool_results.append(handle_tool_call(call_id, name, arguments))
 
-            elif msg_type == "error":
+            elif msg_type in {"error", "session.error"}:
                 print(f"  [error] {msg.get('message', msg)}")
 
     except websockets.ConnectionClosed:

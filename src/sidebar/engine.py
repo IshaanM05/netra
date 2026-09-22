@@ -19,7 +19,7 @@ from .speculation import SpeculativeExecutor
 from . import config
 
 
-class SidebarEngine:
+class NetraEngine:
     def __init__(self):
         self._audio = AudioIO()
         self._agent: AgentClient | None = None
@@ -90,30 +90,62 @@ class SidebarEngine:
 
         print("[engine] activating agent...")
         self._agent_active = True
-        self._agent = AgentClient(self._audio)
+        self._agent = AgentClient(self._audio, sight=self._sight)
 
         self._agent_task = asyncio.create_task(
             self._agent.connect(self._stop_event)
         )
+        agent_task = self._agent_task
+        agent = self._agent
+        self._agent_task.add_done_callback(
+            lambda task: self._on_agent_stopped(agent, task)
+        )
 
-        await asyncio.sleep(1.5)
-
-        if self._agent and self._streaming_listener:
-            summary = self._streaming_listener.transcript.summary()
-            await self._agent.update_context(summary)
+        deadline = time.monotonic() + 10
+        while agent and not agent.connected and time.monotonic() < deadline:
+            if agent_task.done():
+                break
+            await asyncio.sleep(0.05)
+        if agent.connected and self._streaming_listener:
+            await agent.update_context(self._context())
             self._last_context_update = time.monotonic()
-            print("[engine] context sent to agent")
+            print("[engine] conversation and visual context sent to agent")
+        elif time.monotonic() >= deadline and not agent_task.done():
+            print("[engine] agent connection timed out; it will retry on the next wake phrase")
+            agent_task.cancel()
+            self._on_agent_stopped(agent, agent_task)
+
+    def _on_agent_stopped(self, agent: AgentClient, task: asyncio.Task):
+        if self._agent is not agent:
+            return
+        if not task.cancelled():
+            error = task.exception()
+            if error:
+                print(f"[engine] agent connection ended: {error}")
+        if self._stop_event.is_set():
+            return
+        self._agent_active = False
+        self._agent = None
+        self._agent_task = None
+
+    def _context(self) -> str:
+        transcript = self._streaming_listener.transcript.summary()
+        return (f"Active visual adapter: {self._sight.name}.\n"
+                f"Manifest context: {self._manifest_context}\n\n"
+                f"Room conversation:\n{transcript}")
 
     async def _async_context_update(self):
         now = time.monotonic()
         if now - self._last_context_update < self._context_update_interval:
             return
         if self._agent and self._streaming_listener:
-            summary = self._streaming_listener.transcript.summary()
-            await self._agent.update_context(summary)
+            await self._agent.update_context(self._context())
             self._last_context_update = now
 
     async def run(self):
+        self._sight = config.build_sight()
+        manifest = getattr(self._sight, "manifest", None)
+        self._manifest_context = manifest.context() if manifest else "(no per-app or machine manifest configured)"
         self._loop = asyncio.get_event_loop()
         self._audio.start(self._loop)
 
@@ -129,7 +161,7 @@ class SidebarEngine:
             lambda: asyncio.create_task(self._shutdown()),
         )
 
-        print(f"[engine] Sidebar is listening. Say \"{config.WAKE_PHRASE}\" to activate the agent.")
+        print(f"[engine] Netra {self._sight.name.title()} is listening. Say \"{config.WAKE_PHRASE}\" to activate the agent.")
         print("[engine] Ctrl+C to stop.\n")
 
         await self._streaming_listener.run(self._stop_event)

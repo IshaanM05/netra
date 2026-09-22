@@ -104,7 +104,7 @@ class StreamingListener:
                 sample_rate=config.STREAMING_SAMPLE_RATE,
                 speech_model="universal-3-5-pro",
                 speaker_labels=True,
-                keyterms_prompt=["Sidebar", "Hey Sidebar"],
+                keyterms_prompt=["Netra", "Hey Netra"],
             )
         )
 

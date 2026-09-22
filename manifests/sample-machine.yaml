@@ -1,0 +1,23 @@
+manifest:
+  domain: physical_machine
+  name: Prusa MK4 Extruder
+  source: ../assets/prusa-mk4.glb
+  parts:
+    - id: hotend
+      name: hotend
+      aliases: [nozzle assembly, heater block]
+      description: Heats and melts filament before it passes through the nozzle.
+      safety: Allow the hotend to cool before touching it.
+    - id: extruder_motor
+      name: extruder motor
+      aliases: [drive motor, clicking motor]
+      description: Drives filament into the hotend through the gears.
+  vocab:
+    - term: cold pull
+      maps_to: hotend
+  procedures:
+    - name: inspect a clicking extruder
+      steps:
+        - Pause the print and let the hotend cool before touching hardware.
+        - Check that the spool can unwind freely.
+        - Inspect the filament path and extruder gears for debris.
