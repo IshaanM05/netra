@@ -20,5 +20,5 @@ the same flow without a mic.
 - Mis-heard wake word: say "Netra" clearly, or restart with `--autostart`.
 - Wi-Fi down: the viewer needs jsdelivr for three.js, so preload the page before going on stage.
 
-**Numbers to quote** (from `tests/eval_agent.py`): 36/36 scenarios and 48/48 turns pass; tool calls land
+**Numbers to quote** (from `tests/eval_agent.py`): 40/40 scenarios and 53/53 turns pass; tool calls land
 about 0.6 s after the request (p50). Quote the speculation head start from the meter during the run.

@@ -94,7 +94,8 @@ WEB_TOOL_DEFINITIONS = [
         "description": (
             "Call this to read one specific web page, usually a URL returned by search_live, "
             "when the snippet isn't enough to answer. Triggers: 'open that', 'read the guide', "
-            "'what does that page say'."
+            "'what does that page say'. Reading a page can take up to 25 seconds, so first tell the "
+            "user you're opening it."
         ),
         "parameters": {"type": "object", "properties": {
             "url": {"type": "string", "description": "A full http(s) URL"}},
@@ -263,8 +264,57 @@ def _search_live(query: str, hub=None) -> str:
         return f"Live search failed: {exc}"
 
 
+def _scrape_once(url: str, api_key: str, use_browser: bool) -> dict | str:
+    """One inline scrape. Returns the payload dict, or an error string."""
+    response = httpx.post(
+        "https://api.anakin.io/v1/url-scraper/scrape",
+        headers={"X-API-Key": api_key},
+        json={"url": url, "useBrowser": use_browser},
+        timeout=httpx.Timeout(90, connect=10),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    status = payload.get("status")
+    job_id = payload.get("id") or payload.get("jobId")
+    if status == "failed":
+        return f"Live URL scrape failed: {payload.get('error') or 'Anakin.io reported a failed scrape.'}"
+    if status in {"pending", "processing"} and job_id:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            poll = httpx.get(f"https://api.anakin.io/v1/url-scraper/{job_id}",
+                             headers={"X-API-Key": api_key}, timeout=httpx.Timeout(10, connect=5))
+            poll.raise_for_status()
+            payload = poll.json()
+            status = payload.get("status")
+            if status == "failed":
+                return f"Live URL scrape failed: {payload.get('error') or 'Anakin.io reported a failed scrape.'}"
+            if status == "completed":
+                break
+        else:
+            return f"The page is still being scraped by Anakin.io (job {job_id}); try again shortly."
+    elif status not in (None, "completed"):
+        return f"Anakin.io returned an unrecognized scrape status: {status}."
+    return payload
+
+
+def _clean_markdown(content: str) -> str:
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", str(content))
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    # Skip navigation chrome: start at the first top-level heading if there is one.
+    heading = re.search(r"^# .+$", text, flags=re.M)
+    return text[heading.start():] if heading else text
+
+
+def _looks_like_article(text: str) -> bool:
+    """Plain fetches of JS-rendered sites return a short table of template variables."""
+    sentences = re.findall(r"[a-z]{3,}[^.\n]{20,}\.", text)
+    return len(text) >= 1500 and len(sentences) >= 5 and "$undefined" not in text
+
+
 def _scrape_live(url: str, hub=None) -> str:
-    """Fetch a single page through Anakin.io's inline URL scraper."""
+    """Fetch one page via Anakin.io: fast plain fetch first, headless browser if that returns junk."""
     from urllib.parse import urlparse
 
     url = str(url).strip()
@@ -275,47 +325,21 @@ def _scrape_live(url: str, hub=None) -> str:
     if not api_key:
         return "Live URL scraping is unavailable: set ANAKIN_API_KEY to enable Anakin.io scraping."
     try:
-        response = httpx.post(
-            "https://api.anakin.io/v1/url-scraper/scrape",
-            headers={"X-API-Key": api_key},
-            json={"url": url},
-            timeout=httpx.Timeout(90, connect=10),
-        )
-        response.raise_for_status()
-        payload = response.json()
-        status = payload.get("status")
-        job_id = payload.get("id") or payload.get("jobId")
-        if status == "failed":
-            return f"Live URL scrape failed: {payload.get('error') or 'Anakin.io reported a failed scrape.'}"
-        if status in {"pending", "processing"} and job_id:
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                time.sleep(1)
-                poll = httpx.get(
-                    f"https://api.anakin.io/v1/url-scraper/{job_id}",
-                    headers={"X-API-Key": api_key},
-                    timeout=httpx.Timeout(10, connect=5),
-                )
-                poll.raise_for_status()
-                payload = poll.json()
-                status = payload.get("status")
-                if status == "failed":
-                    return f"Live URL scrape failed: {payload.get('error') or 'Anakin.io reported a failed scrape.'}"
-                if status == "completed":
-                    break
-            else:
-                return f"The page is still being scraped by Anakin.io (job {job_id}); try again shortly."
-        elif status not in (None, "completed"):
-            return f"Anakin.io returned an unrecognized scrape status: {status}."
-        content = payload.get("markdown") or payload.get("content") or ""
-        if not content:
-            return "Anakin.io completed the scrape but returned no markdown content."
-        text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", str(content))
-        text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        text, payload = "", {}
+        for use_browser in (False, True):
+            payload = _scrape_once(url, api_key, use_browser)
+            if isinstance(payload, str):
+                if use_browser:
+                    return payload
+                continue
+            text = _clean_markdown(payload.get("markdown") or payload.get("content") or "")
+            if _looks_like_article(text):
+                break
+        if not text:
+            return "Anakin.io completed the scrape but returned no readable content."
         if hub:
             hub.broadcast({"type": "sources", "query": "page", "results": [
                 {"title": payload.get("title") or url, "url": url, "snippet": text[:200]}]})
-        return json.dumps({"url": url, "content": text[:4000]}, ensure_ascii=False)
+        return json.dumps({"url": url, "content": text[:5000]}, ensure_ascii=False)
     except (httpx.HTTPError, ValueError) as exc:
         return f"Live URL scrape failed: {exc}"

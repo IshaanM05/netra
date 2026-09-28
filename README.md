@@ -78,7 +78,7 @@ python tests/rehearse_viewer.py    # mic-free scripted demo in the viewer (http:
 runs the real tools and asserts the tool chosen, the part or procedure step targeted, the viewer events and
 key phrases in the reply. It covers aliases, speech-to-text typos ("heat brake", "thermister"), multi-turn
 procedures with next / back / repeat / switch, safety-first replies, and refusing to invent parts that
-aren't in the manifest. Current result: **36/36 scenarios, 48/48 turns; request → `tool.call` p50 ≈ 0.6 s**.
+aren't in the manifest, plus live web lookups. Current result: **40/40 scenarios, 53/53 turns; request → `tool.call` p50 ≈ 0.6 s**.
 
 ## Voice Agent API notes (learned the hard way)
 
