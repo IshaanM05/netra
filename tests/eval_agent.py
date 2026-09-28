@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 from src.sidebar import config  # noqa: E402
 from src.sidebar.agent import build_session  # noqa: E402
 from src.sidebar.learn import MachineLearner  # noqa: E402
+from src.sidebar.screen import Reading, ScreenSight, TextItem  # noqa: E402
 from src.sidebar.sight import MachineLibrary, Manifest, ModelSight  # noqa: E402
 from src.sidebar.tools import execute_tool, web_tools_enabled  # noqa: E402
 from src.sidebar.viewer import RecordingHub  # noqa: E402
@@ -60,11 +61,21 @@ class Expect:
 class Scenario:
     name: str
     turns: list[tuple[str, Expect]]
+    sight: str = "model"   # "model" (Field) or "screen" (Desktop, with a frozen Figma screen reading)
 
 
 def S(name, *turns):
     return Scenario(name, list(turns))
 
+
+def D(name, *turns):
+    return Scenario(name, list(turns), sight="screen")
+
+
+# What a Figma window looks like to the OCR (text + positions), for Desktop scenarios.
+FIGMA_SCREEN = ["Main menu", "Untitled", "Drafts", "Share", "Present", "Layers", "Assets", "Pages",
+                "Page 1", "Frame 1", "Hero section", "Button", "Design", "Prototype", "Export", "Fill",
+                "Stroke", "Effects", "Layout grid", "100%", "Comments"]
 
 SCENARIOS: list[Scenario] = [
     # ---- locate: direct and indirect part references
@@ -163,6 +174,18 @@ SCENARIOS += [
     S("list machines", ("What machines do you know about?", Expect("load_machine"))),
 ]
 
+SCENARIOS += [
+    # ---- Netra Desktop (frozen Figma screen)
+    D("desktop locate share", ("Where's the share button?", Expect("locate", part="share", any_of=("point",)))),
+    D("desktop vocab artboard", ("Where's my artboard?", Expect("locate", any_of=("point",)))),
+    D("desktop what's on screen", ("What am I looking at right now?", Expect("describe"))),
+    D("desktop procedure",
+      ("How do I export this frame as a PNG?", Expect("walk_through", procedure="export", step=1)),
+      ("Done. Next?", Expect("walk_through", procedure="export", step=2))),
+    D("desktop not visible", ("Where's the timeline?", Expect("locate", any_of=("describe",)))),
+    D("desktop prototype tab", ("Point me to the prototype tab.", Expect("point", part="prototype", any_of=("locate",)))),
+]
+
 # Live web grounding (Anakin). Only run when ANAKIN_API_KEY is set.
 WEB_SCENARIOS: list[Scenario] = [
     S("learn new machine",
@@ -185,6 +208,20 @@ WEB_SCENARIOS: list[Scenario] = [
 
 # ---------------------------------------------------------------- runner
 
+class FrozenReader:
+    available, error = True, ""
+
+    def __init__(self, labels):
+        self.reading = Reading("Figma", [TextItem(t, (90 * i, 40, 90 * i + 70, 60), 0.99)
+                                         for i, t in enumerate(labels)], time.monotonic())
+
+    def request_refresh(self):
+        pass
+
+    def fresh_reading(self, max_age=1.5, timeout=4.0):
+        self.reading.taken_at = time.monotonic()
+        return self.reading
+
 INJECT = "instructions"
 
 
@@ -205,6 +242,7 @@ def inject_payloads(text: str, mode: str) -> list[dict]:
 class TurnResult:
     user: str
     tools: list[tuple[str, dict]] = field(default_factory=list)
+    outputs: list[tuple[str, str]] = field(default_factory=list)
     reply: str = ""
     events: list[dict] = field(default_factory=list)
     seconds: float = 0.0
@@ -219,7 +257,8 @@ class Session:
         self.ws = None
         self.turn_state = ""
         self.needs_refresh = False
-        sight.on_switch = lambda manifest: setattr(self, "needs_refresh", True)  # mirrors the engine
+        if hasattr(sight, "set_manifest"):
+            sight.on_switch = lambda manifest: setattr(self, "needs_refresh", True)  # mirrors the engine
 
     async def __aenter__(self):
         headers = {"Authorization": f"Bearer {config.API_KEY}"}
@@ -279,6 +318,7 @@ class Session:
                 if result.first_tool_s is None:
                     result.first_tool_s = time.monotonic() - started
                 output = await asyncio.to_thread(execute_tool, msg["name"], args, self.sight)
+                result.outputs.append((msg["name"], output))
                 pending.append((msg["call_id"], output))
                 outstanding += 1
                 if self.turn_state == "reply.done":
@@ -326,7 +366,16 @@ def check(sight: ModelSight, expect: Expect, res: TurnResult) -> tuple[bool, str
             targets.append(part and part.get("id"))
         if expect.part not in targets:
             return False, f"expected part {expect.part}, tool targeted {targets} ({calls})"
-    if expect.procedure or expect.step:
+    if (expect.procedure or expect.step) and getattr(sight, "name", "") == "screen":
+        results = [json.loads(o) for n, o in res.outputs if n == "walk_through" and o.startswith("{")]
+        if not results:
+            return False, f"no procedure step returned ({calls})"
+        last = results[-1]
+        if expect.procedure and expect.procedure not in str(last.get("procedure", "")).lower():
+            return False, f"wrong procedure {last.get('procedure')}"
+        if expect.step and last.get("step") != expect.step:
+            return False, f"expected step {expect.step}, got {last.get('step')}"
+    elif expect.procedure or expect.step:
         steps = [e for e in res.events if e.get("type") == "step"]
         if not steps:
             return False, f"no procedure step shown ({calls})"
@@ -350,10 +399,14 @@ def check(sight: ModelSight, expect: Expect, res: TurnResult) -> tuple[bool, str
 async def run_scenario(scn: Scenario, sem: asyncio.Semaphore, debug: bool) -> list[TurnResult]:
     async with sem:
         hub = RecordingHub()
-        library = MachineLibrary(ROOT / "manifests")
-        sight = ModelSight(library.find("Prusa MK4 Extruder"), renderer=hub, library=library)
-        if web_tools_enabled():
-            sight.learner = MachineLearner(library, LEARNED_DIR, hub, on_ready=sight.set_manifest)
+        if scn.sight == "screen":
+            sight = ScreenSight(Manifest.load(ROOT / "manifests" / "sample-app.yaml"),
+                                reader=FrozenReader(FIGMA_SCREEN), overlay=None, move_pointer=False)
+        else:
+            library = MachineLibrary(ROOT / "manifests")
+            sight = ModelSight(library.find("Prusa MK4 Extruder"), renderer=hub, library=library)
+            if web_tools_enabled():
+                sight.learner = MachineLearner(library, LEARNED_DIR, hub, on_ready=sight.set_manifest)
         results = []
         try:
             async with Session(sight, hub, debug) as session:

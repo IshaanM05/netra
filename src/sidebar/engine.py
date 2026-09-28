@@ -302,6 +302,11 @@ class NetraEngine:
                 pass
         if self._hub:
             await self._hub.stop()
+        reader, overlay = getattr(self._sight, "reader", None), getattr(self._sight, "overlay", None)
+        if reader:
+            reader.stop()
+        if overlay:
+            overlay.close()
 
         self._audio.stop()
         print("[engine] done.")

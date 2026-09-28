@@ -7,6 +7,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ os.environ["ANAKIN_API_KEY"] = ""  # keep speculation offline
 
 from src.sidebar.engine import NetraEngine  # noqa: E402
 from src.sidebar.learn import normalize_draft  # noqa: E402
+from src.sidebar.screen import Reading, ScreenSight, TextItem, match_items  # noqa: E402
 from src.sidebar.sight import MachineLibrary, Manifest, ModelSight  # noqa: E402
 from src.sidebar.speculation import SpeculativeExecutor  # noqa: E402
 from src.sidebar.tools import tool_definitions  # noqa: E402
@@ -173,6 +175,63 @@ def test_normalize_learned_draft():
     assert data["procedures"][0]["steps"][0]["parts"] == ["steam_wand"]
     assert data["procedures"][0]["steps"][1] == {"text": "Close it", "parts": []}
     assert data["vocab"] == [{"term": "sputter", "maps_to": "steam_wand"}]
+
+
+class _FakeReader:
+    """A frozen screen reading, so Desktop mode can be tested without a display."""
+    available, error = True, ""
+
+    def __init__(self, labels):
+        self.reading = Reading("Figma", [TextItem(text, (100 * i, 50, 100 * i + 80, 70), 0.99)
+                                         for i, text in enumerate(labels)], time.monotonic())
+        self.refreshes = 0
+
+    def request_refresh(self):
+        self.refreshes += 1
+
+    def fresh_reading(self, max_age=1.5, timeout=4.0):
+        return self.reading
+
+
+class _FakeOverlay:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, command):
+        self.sent.append(command)
+
+
+def test_screen_matching_and_actions():
+    labels = ["File", "Edit", "Export frame", "Share", "Layers", "Assets", "Prototype", "Settings"]
+    assert match_items(_FakeReader(labels).reading.items, "the export button")[0][1].text == "Export frame"
+    assert match_items(_FakeReader(labels).reading.items, "setings")[0][1].text == "Settings"   # STT/OCR typo
+    assert match_items(_FakeReader(labels).reading.items, "the timeline") == []
+    overlay = _FakeOverlay()
+    sight = ScreenSight(reader=_FakeReader(labels), overlay=overlay, move_pointer=False)
+    found = json.loads(sight.act("locate", {"query": "where's share"}))
+    assert found["found"] and found["text"] == "Share" and found["ringed_on_screen"]
+    assert overlay.sent[-1]["ring"] == [300, 50, 380, 70] and overlay.sent[-1]["mode"] == "solid"
+    missing = json.loads(sight.act("locate", {"query": "timeline"}))
+    assert missing["found"] is False and "Layers" in missing["some_visible_text"]
+    overview = json.loads(sight.act("describe", {}))
+    assert overview["window"] == "Figma" and "Prototype" in overview["visible_text"]
+    names = [t["name"] for t in tool_definitions(sight)]
+    assert "expand" not in names and "load_machine" not in names and len(names) <= 10
+
+
+def test_screen_speculation():
+    overlay = _FakeOverlay()
+    reader = _FakeReader(["File", "Export frame", "Share"])
+    sight = ScreenSight(reader=reader, overlay=overlay, move_pointer=False)
+    spec = SpeculativeExecutor(sight)
+    spec.on_partial_turn("where's the")
+    assert reader.refreshes == 1                      # re-read started while still talking
+    spec.on_partial_turn("where's the export")
+    assert overlay.sent[-1]["mode"] == "ghost" and overlay.sent[-1]["label"] == "Export frame"
+    assert spec.claim("locate", {"query": "Export"}) is not None
+    spec.on_partial_turn("where's the share button")
+    assert spec.claim("locate", {"query": "File"}) is None
+    assert overlay.sent[-1] == {"clear": True}
 
 
 def test_wake_parsing():

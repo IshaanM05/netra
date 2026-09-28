@@ -111,11 +111,12 @@ def web_tools_enabled() -> bool:
 def tool_definitions(sight=None) -> list[dict]:
     """Tools to register for this session: sight tools only with an adapter, web tools only with a key."""
     tools = list(UTILITY_TOOL_DEFINITIONS)
-    if getattr(sight, "name", "") == "model":
-        # AssemblyAI recommends <=10 tools per phase; Field mode keeps only calculate from the utilities.
-        tools = [t for t in tools if t["name"] == "calculate"]
     if sight is not None:
-        tools += SIGHT_TOOL_DEFINITIONS
+        # AssemblyAI recommends <=10 tools per phase: with a visual adapter keep only calculate
+        # from the utilities, and only the visual tools this adapter supports.
+        tools = [t for t in tools if t["name"] == "calculate"]
+        supported = getattr(sight, "tools", SIGHT_TOOLS)
+        tools += [t for t in SIGHT_TOOL_DEFINITIONS if t["name"] in supported]
     if web_tools_enabled():
         tools += WEB_TOOL_DEFINITIONS
     return tools

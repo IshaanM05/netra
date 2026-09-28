@@ -1,14 +1,35 @@
 manifest:
   domain: screen_app
   name: Figma
+  aliases: [figma, design file]
+  # Netra Desktop reads the real screen; this manifest only adds app vocabulary and procedures.
+  # vocab.label = the text the app actually shows for what the user calls `term`.
   vocab:
     - term: artboard
+      label: Frame
       meaning: A frame or canvas containing the design layout.
     - term: layers panel
+      label: Layers
       meaning: The left-side panel that lists objects and frames in the current file.
+    - term: download
+      label: Export
+      meaning: Exporting assets from the design properties panel.
+    - term: invite
+      label: Share
+      meaning: Sharing the file with collaborators.
+    - term: components
+      label: Assets
+      meaning: The Assets tab lists reusable components and styles.
   procedures:
     - name: export selected frame
+      aliases: [export a frame, export as png, download the design, export an image, save as png]
       steps:
-        - Select the frame in the layers panel or on the canvas.
-        - Open the export section in the design properties panel.
-        - Choose the required format and select Export.
+        - text: Select the frame in the Layers panel or click its name on the canvas.
+        - text: In the right-hand Design panel, scroll to the Export section and click the plus.
+        - text: Choose PNG, SVG or PDF and the scale, then click Export.
+    - name: share the file
+      aliases: [invite someone, share with my team, give access]
+      steps:
+        - text: Click Share in the top-right corner.
+        - text: Type the person's email and choose "can view" or "can edit".
+        - text: Click Send invite.

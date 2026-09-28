@@ -5,6 +5,12 @@ Hands full, eyes on the machine, manual out of reach. Netra is a voice assistant
 keeps clicking"** and it walks you through the fix one step at a time, highlighting each part as you go.
 It pulls the assembly apart on request, checks the official docs on the web, and says safety notes first.
 
+**One engine, any machine.** Say "switch to my bike" and the view, vocabulary and procedures change. Name a
+machine Netra has never seen ("I'm working on a Breville Barista Express") and it **learns it live**: it finds the
+official manual on the web, reads it, drafts a parts-and-procedures pack in about 15 seconds, and tells you when
+it's ready. **Netra Desktop** does the same for software: it reads your screen, rings the button you asked
+about and moves the pointer there.
+
 Built for the **AssemblyAI Voice Agent Hackathon** on AssemblyAI's **Voice Agent API** (speech in, reasoning,
 tool calls, speech out) and **Universal-3.5 Pro streaming** (always-on ears).
 
@@ -44,6 +50,8 @@ average head start live.
 | `src/sidebar/sight.py` | Manifest loader; `ModelSight` (phrase + fuzzy part resolution, procedure state, side-effect-free `preview`) and `ScreenSight` (OCR + pointer) |
 | `src/sidebar/viewer.py` · `viewer/index.html` | WebSocket hub + three.js viewer (highlight, ghost, explode, focus, step card, transcript, sources, speculation meter) |
 | `src/sidebar/tools.py` | Tool schemas and execution, including Anakin.io `search_live` / `scrape_live` |
+| `src/sidebar/learn.py` | Learns an unknown machine from its manual: Anakin search/scrape → LLM Gateway draft → validated manifest |
+| `src/sidebar/screen.py` · `overlay.py` | Netra Desktop: background OCR of the focused window, fuzzy label matching, on-screen ring, pointer |
 
 ## Run it
 
@@ -58,18 +66,31 @@ python run.py --open                                     # say "Hey Netra, where
 `--autostart` skips the wake phrase. Say "Netra, stop" to end a session. Use headphones on stage (the
 agent's voice is also gated from the mic while it speaks).
 
+**Machine library.** Every `physical_machine` YAML in `manifests/` is a machine: the 3D-printer extruder and a
+bicycle drivetrain ship as live 3D models. "Switch to my bike, I got a flat" loads the bike *and* starts the
+flat-tire procedure in one turn (`load_machine` with `also_asked`). You can also pick from the viewer's dropdown.
+
+**Learning new machines.** `load_machine` for an unknown machine starts `MachineLearner` in the background
+(`src/sidebar/learn.py`): Anakin search → read the top two pages (headless-browser fallback for JS sites) →
+AssemblyAI **LLM Gateway** drafts a manifest → validation and repair (ids, step→part references, junk safety
+text) → saved to `manifests/learned/`. The viewer shows progress, the agent announces "it's ready", and the
+machine appears as a labelled schematic you can locate parts on and walk procedures with.
+
 **Your own machine.** Write a manifest (see `manifests/sample-machine.yaml`) with parts, aliases, vocab and
 step-by-step procedures, where each step names the parts it touches. Point `source:` at a `.glb` whose node
 names match the part ids, or keep the built-in procedural extruder.
 
-**Netra Desktop.** `python run.py --sight screen --manifest ""` reads the screen with local OCR and moves the
-pointer to what you ask about (it never clicks). Needs `pyautogui`, `pytesseract` and Tesseract.
+**Netra Desktop.** `python run.py --desktop` (optionally `--manifest manifests/sample-app.yaml` for Figma vocabulary
+and procedures). A background reader re-OCRs the focused window only when its pixels change (RapidOCR, pip-only,
+no system Tesseract). Speculation triggers a fresh read the moment you start asking, so `locate` usually answers
+from a reading that's already done (3 ms in our test vs about 2.5 s for a cold OCR pass). The target gets a
+cyan ring on screen (amber while predicting), and the pointer moves to it. It never clicks. Linux/X11.
 
 ## Testing
 
 ```bash
-python tests/test_sight.py         # offline: resolution (incl. STT typos), procedures, speculation, wake parsing
-python tests/eval_agent.py -j 6    # live: 40 multi-turn scenarios (web ones need ANAKIN_API_KEY) against the real Voice Agent API session
+python tests/test_sight.py         # offline: resolution, procedures, speculation, library, learned-pack repair, desktop
+python tests/eval_agent.py -j 8    # live: 51 multi-turn scenarios (web + learning ones need ANAKIN_API_KEY) against the real Voice Agent API session
 python tests/smoke_anakin.py       # live: one search + one scrape through Anakin.io
 python tests/rehearse_viewer.py    # mic-free scripted demo in the viewer (http://127.0.0.1:8765)
 ```
@@ -78,7 +99,9 @@ python tests/rehearse_viewer.py    # mic-free scripted demo in the viewer (http:
 runs the real tools and asserts the tool chosen, the part or procedure step targeted, the viewer events and
 key phrases in the reply. It covers aliases, speech-to-text typos ("heat brake", "thermister"), multi-turn
 procedures with next / back / repeat / switch, safety-first replies, and refusing to invent parts that
-aren't in the manifest, plus live web lookups. Current result: **40/40 scenarios, 53/53 turns; request → `tool.call` p50 ≈ 0.6 s**.
+aren't in the manifest, live web lookups, machine switching with follow-up requests, learning a new machine from
+the web and then using it, and Desktop mode on a Figma screen. Current result: **51/51 scenarios, 71/71 turns;
+request → `tool.call` p50 ≈ 0.7 s**.
 
 ## Voice Agent API notes (learned the hard way)
 

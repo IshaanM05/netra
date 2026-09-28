@@ -40,6 +40,9 @@ _SEARCH_INTENT = re.compile(
 _PROCEDURE_INTENT = re.compile(
     r"\b(?:walk me through|how do i|how to|help me|fix|keeps|won't|isn't|is not|problem|issue|error|"
     r"clogged|clicking|jammed|broken|replace|swap)\b")
+_SCREEN_INTENT = re.compile(
+    r"\b(?:where(?:'s| is| do i find)|find|show me|point (?:to|at)|locate|how do i (?:get to|open|find))\s+(.+)")
+_SCREEN_ASK = re.compile(r"\b(?:where|find|show|point|what'?s on|read|see|which)\b")
 _DESCRIBE_INTENT = re.compile(r"\bwhat (?:does|do|is|'s)\b.*\b(?:do|for|does)\b")
 _DEFINE_INTENT = [
     re.compile(r"(?:what(?:'s| is) (?:the )?(?:definition|meaning) of|define) ['\"]?(\w+)"),
@@ -75,6 +78,7 @@ class SpeculativeCall:
     result: str | None = None
     part_ids: list[str] = field(default_factory=list)
     lead_ms: float = 0.0
+    screen_target: dict | None = None
     done: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -120,6 +124,7 @@ class SpeculativeExecutor:
         self._stats = SpeculationStats()
         self._search_candidate: tuple[str, float] | None = None
         self._searches_this_turn = 0
+        self._screen_refreshed = False
 
     @property
     def stats(self) -> SpeculationStats:
@@ -143,14 +148,18 @@ class SpeculativeExecutor:
         self._speculate(text, final=True)
         self._search_candidate = None
         self._searches_this_turn = 0
+        self._screen_refreshed = False
 
     def _speculate(self, text: str, final: bool):
         lower = text.lower().strip()
         if len(lower) < 6:
             return
         self._expire()
-        if self._sight is not None and getattr(self._sight, "name", "") == "model":
+        kind = getattr(self._sight, "name", "")
+        if kind == "model":
             self._speculate_visual(lower, text)
+        elif kind == "screen":
+            self._speculate_screen(lower, text)
         if web_tools_enabled():
             self._speculate_search(lower, text, final)
         self._speculate_define(lower, text)
@@ -181,6 +190,26 @@ class SpeculativeExecutor:
         args = {"query": str(part.get("name"))} if tool == "locate" else {"target": str(part.get("name"))}
         result = sight.preview(tool, args)
         self._fire("part", SpeculativeCall(tool, args, part_id, text, part_ids=[part_id]), result)
+
+    def _speculate_screen(self, lower: str, text: str):
+        sight = self._sight
+        if not self._screen_refreshed and _SCREEN_ASK.search(lower):
+            # start re-reading the screen now, while the user is still talking
+            self._screen_refreshed = True
+            sight.reader.request_refresh()
+        match = _SCREEN_INTENT.search(lower)
+        if not match:
+            return
+        target = match.group(1).strip(" ?.,")
+        if len(target) < 3:
+            return
+        found = sight.resolve(target)
+        if found is None or self._same("part", found["id"]):
+            return
+        args = {"query": target}
+        call = SpeculativeCall("locate", args, found["id"], text)
+        call.screen_target = found
+        self._fire("part", call, sight.preview("locate", args))
 
     def _speculate_search(self, lower: str, text: str, final: bool):
         match = _SEARCH_INTENT.search(lower)
@@ -234,6 +263,8 @@ class SpeculativeExecutor:
         self._replace(slot, call)
         for part_id in call.part_ids:
             self._emit({"type": "highlight", "part_id": part_id, "mode": "ghost"})
+        if getattr(call, "screen_target", None) and hasattr(self._sight, "ghost"):
+            self._sight.ghost(call.screen_target)
         print(f"  \033[1;33m[speculate]\033[0m {call.tool_name}({json.dumps(call.arguments)}) from partial")
 
     def _fire_async(self, slot: str, call: SpeculativeCall):
@@ -266,6 +297,8 @@ class SpeculativeExecutor:
         self._stats.misses += 1
         if call.part_ids:
             self._emit({"type": "clear_ghost", "part_ids": call.part_ids})
+        if getattr(call, "screen_target", None) and hasattr(self._sight, "clear_ghost"):
+            self._sight.clear_ghost()
         self._emit({"type": "spec", "kind": "miss", "tool": call.tool_name, "label": call.key})
         self._emit_stats()
 

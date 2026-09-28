@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
-import platform
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -197,6 +195,7 @@ class Sight(Protocol):
 class ModelSight:
     """Physical-machine adapter. Resolves parts from the manifest and drives the 3D viewer."""
     name = "model"
+    tools = {"locate", "point", "expand", "describe", "walk_through", "reset_view", "load_machine"}
 
     _WHOLE_WORDS = {"all", "everything", "whole", "entire", "assembly", "extruder", "machine",
                     "it", "thing", "printer", "head", "the", "whole", "overview", "view", "none"}
@@ -442,124 +441,6 @@ class ModelSight:
             "next_step": step_number + 1 if step_number < len(steps) else None,
             "shown_in_3d_view": self._viewer_live,
         }, ensure_ascii=False)
-
-
-class ScreenSight:
-    """Desktop adapter. Uses OS accessibility names where available and a cursor pointer."""
-    name = "screen"
-
-    def __init__(self, manifest: Manifest | None = None):
-        self.manifest = manifest
-        self._last_match: tuple[str, int, int] | None = None
-
-    def _screen_text(self) -> list[tuple[str, int, int]]:
-        """Read visible text and its center coordinates using local OCR."""
-        try:
-            import pyautogui
-            import pytesseract
-            image = pyautogui.screenshot()
-            data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-            lines: dict[tuple[int, int, int], list[tuple[str, int, int, int, int]]] = {}
-            for index, raw in enumerate(data["text"]):
-                text = str(raw).strip()
-                if not text or float(data["conf"][index]) < 30:
-                    continue
-                key = (int(data["block_num"][index]), int(data["par_num"][index]),
-                       int(data["line_num"][index]))
-                lines.setdefault(key, []).append((
-                    text, int(data["left"][index]), int(data["top"][index]),
-                    int(data["width"][index]), int(data["height"][index])))
-            found = []
-            for words in lines.values():
-                words.sort(key=lambda word: word[1])
-                left = min(word[1] for word in words)
-                top = min(word[2] for word in words)
-                right = max(word[1] + word[3] for word in words)
-                bottom = max(word[2] + word[4] for word in words)
-                found.append((" ".join(word[0] for word in words),
-                              (left + right) // 2, (top + bottom) // 2))
-            return found
-        except ImportError:
-            return []
-        except Exception:
-            return []
-
-    def _accessibility_names(self) -> list[str]:
-        if platform.system() != "Darwin":
-            return []
-        script = ('tell application "System Events" to tell (first process whose frontmost is true) '
-                  'to get name of every UI element of window 1')
-        try:
-            result = subprocess.run(["osascript", "-e", script], capture_output=True,
-                                    text=True, timeout=3, check=False)
-            return [item.strip() for item in result.stdout.split(",") if item.strip()]
-        except (OSError, subprocess.TimeoutExpired):
-            return []
-
-    def act(self, verb: str, arguments: dict[str, Any]) -> str:
-        query = str(arguments.get("target") or arguments.get("query") or "").strip()
-        if verb == "walk_through" and self.manifest:
-            return ModelSight(self.manifest).act(verb, arguments)
-        if verb == "reset_view":
-            return "The desktop adapter has no view to reset."
-        names = self._accessibility_names()
-        screen_text = self._screen_text()
-        if verb == "locate":
-            vocab_hints = []
-            if self.manifest:
-                terms = _tokens(query)
-                for item in self.manifest.vocab:
-                    vocab_terms = _tokens(str(item.get("term", "")))
-                    if vocab_terms and vocab_terms.issubset(terms):
-                        vocab_hints.append(item)
-            accessibility_matches = [name for name in names if query.lower() in name.lower()]
-            matches = [entry for entry in screen_text if query.lower() in entry[0].lower()]
-            if not matches and vocab_hints:
-                concepts = set().union(*(_tokens(str(item.get("meaning", "")))
-                                         for item in vocab_hints))
-                matches = [entry for entry in screen_text if concepts & _tokens(entry[0])]
-            if matches:
-                self._last_match = matches[0]
-                text, x, y = matches[0]
-                return f"Found visible text '{text}' near ({x}, {y}). Call point with target '{text}' to move the pointer there."
-            if accessibility_matches:
-                return (f"Matching accessibility elements: {accessibility_matches[:10]}. "
-                        "No OCR coordinates were available; provide screen coordinates to point.")
-            if vocab_hints:
-                return ("App guidance: " + json.dumps(vocab_hints, ensure_ascii=False)
-                        + " No matching visible label was found.")
-            return ("No matching accessibility element was found. "
-                    "No matching visible text was found either. Describe the target or provide screen coordinates.")
-        if verb == "describe":
-            summary = " ".join(item[0] for item in screen_text[:100])
-            if names:
-                summary += f"\nAccessibility names: {names[:40]}"
-            return summary[:4000] if summary else "Could not read screen text. Check screen capture and OCR permissions/dependencies."
-        if verb == "point":
-            x, y = arguments.get("x"), arguments.get("y")
-            if x is None and y is None and query:
-                match = next((entry for entry in screen_text if query.lower() in entry[0].lower()), None)
-                if match:
-                    self._last_match = match
-            if x is None and y is None and self._last_match:
-                _, x, y = self._last_match
-            try:
-                import pyautogui
-                if x is not None and y is not None:
-                    width, height = pyautogui.size()
-                    px, py = int(x), int(y)
-                    if not (0 <= px < width and 0 <= py < height):
-                        return f"Coordinates must be within the screen ({width}x{height})."
-                    pyautogui.moveTo(px, py, duration=0.25)
-                    return f"Pointer moved to screen position ({px}, {py}) to indicate {query or 'the target'}."
-                return "To point on screen, provide x and y coordinates. No click was performed."
-            except ImportError:
-                return "Screen pointing requires pyautogui. Install the optional desktop dependencies."
-            except Exception as exc:
-                return f"Could not move the screen pointer: {exc}"
-        if verb == "expand":
-            return "Screen zoom is not available through the current desktop adapter."
-        return f"Unsupported screen action: {verb}."
 
 
 SIGHT_TOOLS = {"locate", "point", "expand", "describe", "walk_through", "reset_view", "load_machine"}

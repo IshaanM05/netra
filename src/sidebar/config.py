@@ -1,3 +1,4 @@
+import json
 import os
 from dotenv import load_dotenv
 
@@ -62,9 +63,19 @@ def build_system_prompt(sight=None, web_enabled: bool = False, room_context: str
     elif getattr(sight, "name", "") == "model" and manifest:
         parts.append(f"## Active view: live 3D model\n{manifest.spoken_context()}")
     else:
-        extra = f"\nApp context: {manifest.context()}" if manifest else ""
-        parts.append("## Active view: the user's desktop screen. locate/describe read visible text; "
-                     f"point moves the mouse pointer and never clicks.{extra}")
+        extra = f"\nApp: {manifest.name}. Vocabulary: {json.dumps(manifest.vocab)}" if manifest else ""
+        procs = ("\nProcedures: " + "; ".join(str(p.get('name')) for p in manifest.procedures)) if manifest and manifest.procedures else ""
+        parts.append("## Active view: the user's live desktop screen (Netra Desktop)\n"
+                     "You can read the text in the focused window. locate finds a visible label, rings it on screen "
+                     "and moves the mouse pointer to it (it never clicks — tell the user to click). describe with no "
+                     "target reads the window. Use the words the user would see on screen as the query, e.g. "
+                     "'Export', 'Share', 'Settings'. If locate says found=false, tell them what you can see instead "
+                     "and ask them to open the right menu.\n"
+                     "- \"How do I …\" / \"walk me through …\" questions that match a listed procedure → walk_through "
+                     "first (one step at a time), even if you could also locate a button.\n"
+                     "- Only say you moved the pointer or ringed something if the result says pointer_moved / "
+                     "ringed_on_screen is true. Say where things are in plain words (\"top right\"), not coordinates."
+                     f"{extra}{procs}")
     if not web_enabled:
         parts.append("Live web search is not available in this session; say so if asked for current facts.")
     if room_context:
@@ -77,7 +88,8 @@ MANIFEST_PATH = os.environ.get("NETRA_MANIFEST", "").strip()
 
 
 def build_sight(renderer=None):
-    from .sight import Manifest, ModelSight, ScreenSight
+    from .screen import OverlayClient, ScreenSight
+    from .sight import Manifest, ModelSight
 
     manifest = Manifest.load(MANIFEST_PATH) if MANIFEST_PATH else None
     kind = SIGHT_KIND
@@ -90,5 +102,5 @@ def build_sight(renderer=None):
     if kind == "screen":
         if manifest and manifest.domain != "screen_app":
             raise ValueError("NETRA_SIGHT=screen requires a screen_app manifest, if a manifest is supplied.")
-        return ScreenSight(manifest)
+        return ScreenSight(manifest, overlay=OverlayClient())
     raise ValueError("NETRA_SIGHT must be 'screen' or 'model'.")
