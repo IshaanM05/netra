@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Netra Field</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #12151a; --panel-2: #181c22; --line: #242a33;
+    --text: #e7eaee; --muted: #8b95a3; --dim: #5b6572;
+    --solid: #22d3ee; --ghost: #f5a524; --ok: #34d399; --bad: #f87171; --brand: #fa6831;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 Inter, system-ui, sans-serif; overflow: hidden; }
+  .app { display: grid; grid-template-columns: 1fr 380px; height: 100vh; }
+  .stage { position: relative; min-width: 0; }
+  #canvas { position: absolute; inset: 0; }
+  .brand { position: absolute; top: 18px; left: 22px; display: flex; align-items: center; gap: 12px; pointer-events: none; }
+  .brand .logo { width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--solid);
+    display: grid; place-items: center; box-shadow: 0 0 18px #22d3ee55; }
+  .brand .logo::after { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--solid); }
+  .brand h1 { font-size: 16px; margin: 0; letter-spacing: .08em; font-weight: 700; }
+  .brand .sub { color: var(--muted); font-size: 12px; }
+  .status { position: absolute; top: 20px; right: 20px; display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 999px; background: #12151acc; border: 1px solid var(--line);
+    font-size: 12px; color: var(--muted); backdrop-filter: blur(6px); }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .status[data-state="listening"] .dot { background: var(--muted); }
+  .status[data-state="connecting"] .dot { background: var(--ghost); animation: blink 1s infinite; }
+  .status[data-state="active"] .dot { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .status[data-state="offline"] .dot { background: var(--bad); }
+  @keyframes blink { 50% { opacity: .3; } }
+
+  .caption { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); max-width: 78%;
+    padding: 12px 20px; border-radius: 14px; background: #0b0d10d9; border: 1px solid var(--line);
+    font-size: 18px; text-align: center; backdrop-filter: blur(8px); transition: opacity .25s; }
+  .caption.empty { opacity: 0; }
+  .caption .who { display: block; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+  .caption.agent .who { color: var(--solid); }
+
+  .tag { position: absolute; transform: translate(-50%, -130%); pointer-events: none; white-space: nowrap;
+    padding: 5px 10px; border-radius: 8px; font-size: 12px; font-weight: 600; transition: opacity .2s; }
+  .tag.solid { background: #0e2a31; color: var(--solid); border: 1px solid var(--solid); box-shadow: 0 0 16px #22d3ee44; }
+  .tag.ghost { background: #2f230c; color: var(--ghost); border: 1px dashed var(--ghost); }
+  .tag.ghost::before { content: "predicting · "; font-weight: 500; opacity: .8; }
+  .tag::after { content: ""; position: absolute; left: 50%; top: 100%; width: 1px; height: 18px; background: currentColor; opacity: .6; }
+
+  .speccard { position: absolute; left: 22px; top: 70px; width: 250px; padding: 12px 14px; border-radius: 12px;
+    background: #12151ae6; border: 1px solid var(--line); backdrop-filter: blur(6px); }
+  .speccard h3 { margin: 0 0 8px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--ghost); }
+  .speccard .nums { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .speccard .n { font: 600 20px JetBrains Mono, monospace; }
+  .speccard .l { font-size: 11px; color: var(--muted); }
+  .speccard .lead { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .speccard .lead b { color: var(--ghost); font: 600 15px JetBrains Mono, monospace; }
+  .speccard .last { margin-top: 6px; font: 12px JetBrains Mono, monospace; color: var(--dim); min-height: 16px; }
+  .speccard .last.hit { color: var(--ok); } .speccard .last.miss { color: var(--bad); }
+
+  aside { background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  aside section { padding: 16px 18px; border-bottom: 1px solid var(--line); }
+  aside h2 { margin: 0 0 10px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .machine { font-weight: 600; font-size: 15px; }
+  .machine small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+  .step { display: none; }
+  .step.show { display: block; }
+  .step .proc { font-weight: 600; text-transform: capitalize; }
+  .step .count { color: var(--solid); font: 600 12px JetBrains Mono, monospace; }
+  .step .instr { margin-top: 8px; font-size: 15px; }
+  .step .dots { display: flex; gap: 5px; margin-top: 10px; }
+  .step .dots i { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+  .step .dots i.done { background: #22d3ee66; } .step .dots i.cur { background: var(--solid); }
+  .log { flex: 1; overflow-y: auto; padding: 12px 18px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .msg { padding: 8px 11px; border-radius: 10px; max-width: 92%; }
+  .msg.user { align-self: flex-end; background: var(--panel-2); }
+  .msg.agent { align-self: flex-start; background: #0e2a31; border: 1px solid #22d3ee33; }
+  .tool { align-self: stretch; font: 12px JetBrains Mono, monospace; color: var(--muted); padding: 2px 4px; }
+  .tool b { color: var(--text); font-weight: 600; }
+  .tool .spec { color: var(--ok); } .tool .ms { color: var(--dim); }
+  .sources { display: none; }
+  .sources.show { display: block; }
+  .src { display: block; padding: 8px 10px; margin-top: 6px; border-radius: 8px; background: var(--panel-2); color: var(--text); text-decoration: none; }
+  .src .t { font-weight: 600; font-size: 13px; }
+  .src .u { color: var(--solid); font-size: 11px; font-family: JetBrains Mono, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .demo { position: absolute; bottom: 110px; left: 22px; display: none; flex-wrap: wrap; gap: 6px; max-width: 60%; }
+  .demo.show { display: flex; }
+  .demo button { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; font: 12px Inter; cursor: pointer; }
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: 58vh 42vh; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+    .speccard { display: none; }
+    .caption { font-size: 15px; max-width: 92%; }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div class="app">
+  <div class="stage">
+    <div id="canvas"></div>
+    <div class="brand"><div class="logo"></div><div><h1>NETRA</h1><div class="sub">Field · voice that sees</div></div></div>
+    <div class="status" id="status" data-state="offline"><span class="dot"></span><span id="statusText">connecting to engine…</span></div>
+    <div class="demo" id="demo"></div>
+    <div id="tags"></div>
+    <div class="caption empty" id="caption"><span class="who" id="captionWho"></span><span id="captionText"></span></div>
+    <div class="speccard">
+      <h3>Speculative execution</h3>
+      <div class="nums">
+        <div><div class="n" id="sFired">0</div><div class="l">fired</div></div>
+        <div><div class="n" id="sHits" style="color:var(--ok)">0</div><div class="l">hits</div></div>
+        <div><div class="n" id="sMiss" style="color:var(--bad)">0</div><div class="l">misses</div></div>
+      </div>
+      <div class="lead">avg head start <b id="sLead">—</b></div>
+      <div class="last" id="sLast"></div>
+    </div>
+  </div>
+  <aside>
+    <section>
+      <h2>Machine</h2>
+      <div class="machine" id="machine">—<small>waiting for manifest</small></div>
+    </section>
+    <section class="step" id="step">
+      <h2>Procedure <span class="count" id="stepCount"></span></h2>
+      <div class="proc" id="stepProc"></div>
+      <div class="instr" id="stepInstr"></div>
+      <div class="dots" id="stepDots"></div>
+    </section>
+    <section class="sources" id="sources">
+      <h2>Sources</h2>
+      <div id="sourceList"></div>
+    </section>
+    <div class="log" id="log"></div>
+  </aside>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+// ------------------------------------------------------------------ scene
+const host = document.getElementById("canvas");
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+host.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d10);
+scene.fog = new THREE.Fog(0x0b0d10, 30, 60);
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
+const HOME = { pos: new THREE.Vector3(9.5, 5.5, 12), target: new THREE.Vector3(0, 1.6, 0) };
+camera.position.copy(HOME.pos);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(HOME.target);
+controls.enableDamping = true;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.6;
+
+scene.add(new THREE.HemisphereLight(0xdbe8ff, 0x2a2f36, 1.6));
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(6, 10, 7); scene.add(key);
+const rim = new THREE.DirectionalLight(0x6fd3ff, 1.0); rim.position.set(-8, 4, -6); scene.add(rim);
+const grid = new THREE.GridHelper(30, 30, 0x1d232b, 0x151a20); grid.position.y = -2.4; scene.add(grid);
+
+function resize() {
+  const { clientWidth: w, clientHeight: h } = host;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(host); resize();
+
+// ------------------------------------------------------------------ procedural extruder
+const M = (color, o = {}) => new THREE.MeshStandardMaterial({ color, metalness: o.m ?? 0.3, roughness: o.r ?? 0.5,
+  transparent: o.t != null, opacity: o.t ?? 1 });
+const alu = () => M(0xb9bec6, { m: 0.8, r: 0.35 });
+const parts = {};      // id -> THREE.Group
+const labels = {};     // id -> display name
+
+function part(id, name, build) {
+  const g = new THREE.Group(); g.name = id; build(g); root.add(g);
+  parts[id] = g; labels[id] = name;
+  g.userData.home = g.position.clone();
+  g.traverse(o => { if (o.isMesh) { o.userData.partId = id; o.userData.baseMat = o.material; } });
+  return g;
+}
+function mesh(geo, mat, x = 0, y = 0, z = 0, rot) {
+  const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z);
+  if (rot) m.rotation.set(...rot); return m;
+}
+const root = new THREE.Group(); scene.add(root);
+
+function buildProcedural() {
+
+  part("ptfe_tube", "PTFE tube", g => {
+    g.add(mesh(new THREE.CylinderGeometry(0.16, 0.16, 2.4, 24), M(0xf4f6f8, { r: 0.2, t: 0.75 }), 0, 4.9, 0));
+  });
+  part("filament_sensor", "filament sensor", g => {
+    g.add(mesh(new THREE.BoxGeometry(0.8, 0.45, 0.7), M(0x2a2f36), 0, 3.5, 0));
+    g.add(mesh(new THREE.SphereGeometry(0.06, 12, 12), new THREE.MeshBasicMaterial({ color: 0x34d399 }), 0.3, 3.55, 0.36));
+  });
+  part("gearbox", "drive gears", g => {
+    const gear = (x, teeth) => {
+      const shape = new THREE.Shape(); const r1 = 0.42, r2 = 0.5;
+      for (let i = 0; i <= teeth * 2; i++) {
+        const a = (i / (teeth * 2)) * Math.PI * 2, r = i % 2 ? r1 : r2;
+        i ? shape.lineTo(Math.cos(a) * r, Math.sin(a) * r) : shape.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+      }
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.3, bevelEnabled: false }); geo.center();
+      g.add(mesh(geo, M(0xd8b45a, { m: 0.85, r: 0.3 }), x, 2.35, 0));
+    };
+    gear(-0.52, 16); gear(0.52, 16);
+    g.add(mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.3, 8), M(0xdddddd, { m: 0.9 }), 0, 2.35, 0)); // filament
+  });
+  part("idler_lever", "idler lever", g => {
+    g.add(mesh(new THREE.BoxGeometry(0.5, 2.0, 0.5), M(0xfa6831, { r: 0.55 }), 1.35, 2.5, 0, [0, 0, -0.12]));
+    g.add(mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16), M(0x9aa1ab, { m: 0.9 }), 1.55, 3.55, 0, [0, 0, Math.PI / 2]));
+  });
+  part("extruder_motor", "extruder motor", g => {
+    g.add(mesh(new THREE.BoxGeometry(2.1, 2.1, 1.6), M(0x1c1f24, { m: 0.5, r: 0.45 }), -0.1, 2.35, -1.9));
+    g.add(mesh(new THREE.BoxGeometry(2.14, 2.14, 0.22), M(0x9aa1ab, { m: 0.85 }), -0.1, 2.35, -1.15));
+    g.add(mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.8, 16), M(0xdddddd, { m: 0.9 }), -0.52, 2.35, -0.6, [Math.PI / 2, 0, 0]));
+  });
+  part("heatsink", "heatsink", g => {
+    for (let i = 0; i < 9; i++) g.add(mesh(new THREE.CylinderGeometry(0.72, 0.72, 0.06, 40), alu(), 0, 0.3 + i * 0.13, 0));
+    g.add(mesh(new THREE.CylinderGeometry(0.28, 0.28, 1.2, 20), alu(), 0, 0.85, 0));
+  });
+  part("hotend_fan", "hotend fan", g => {
+    const frame = mesh(new THREE.BoxGeometry(1.6, 1.6, 0.35), M(0x24292f), 0, 0.85, 1.0); g.add(frame);
+    const hub = mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.4, 20), M(0x3a4048), 0, 0.85, 1.05, [Math.PI / 2, 0, 0]); g.add(hub);
+    const blades = new THREE.Group(); blades.position.set(0, 0.85, 1.2); g.add(blades); g.userData.spin = blades;
+    for (let i = 0; i < 7; i++) {
+      const b = mesh(new THREE.BoxGeometry(0.62, 0.16, 0.03), M(0x3a4048), 0, 0, 0);
+      b.position.set(Math.cos(i / 7 * Math.PI * 2) * 0.4, Math.sin(i / 7 * Math.PI * 2) * 0.4, 0);
+      b.rotation.z = i / 7 * Math.PI * 2; b.rotation.x = 0.4; blades.add(b);
+    }
+  });
+  part("heatbreak", "heatbreak", g => {
+    g.add(mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.55, 20), M(0xc9cdd3, { m: 0.9, r: 0.2 }), 0, 0.05, 0));
+  });
+  part("hotend", "heater block", g => {
+    g.add(mesh(new THREE.BoxGeometry(1.5, 0.75, 1.0), M(0xc4c8cf, { m: 0.75, r: 0.35 }), 0.1, -0.6, 0));
+  });
+  part("heater_cartridge", "heater cartridge", g => {
+    g.add(mesh(new THREE.CylinderGeometry(0.16, 0.16, 1.5, 20), M(0x8b949e, { m: 0.8 }), -0.35, -0.6, 0.2, [Math.PI / 2, 0, 0]));
+    g.add(mesh(new THREE.CylinderGeometry(0.035, 0.035, 1.2, 8), M(0xd6453d), -0.3, -0.6, 1.45, [Math.PI / 2, 0, 0]));
+    g.add(mesh(new THREE.CylinderGeometry(0.035, 0.035, 1.2, 8), M(0xd6453d), -0.4, -0.6, 1.45, [Math.PI / 2, 0, 0]));
+  });
+  part("thermistor", "thermistor", g => {
+    g.add(mesh(new THREE.CylinderGeometry(0.08, 0.08, 1.1, 16), M(0x5c636d, { m: 0.7 }), 0.55, -0.7, 0.3, [Math.PI / 2, 0, 0]));
+    g.add(mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.1, 8), M(0xf2c94c), 0.55, -0.7, 1.35, [Math.PI / 2, 0, 0]));
+  });
+  part("nozzle", "nozzle", g => {
+    g.add(mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.25, 6), M(0xc9a24a, { m: 0.9, r: 0.25 }), 0.1, -1.1, 0));
+    g.add(mesh(new THREE.ConeGeometry(0.24, 0.45, 24), M(0xc9a24a, { m: 0.9, r: 0.25 }), 0.1, -1.45, 0, [Math.PI, 0, 0]));
+  });
+  part("print_fan", "part cooling fan", g => {
+    g.add(mesh(new THREE.BoxGeometry(0.7, 1.4, 1.4), M(0x24292f), 1.9, -0.1, 0.1));
+    g.add(mesh(new THREE.BoxGeometry(0.9, 0.35, 0.6), M(0xfa6831, { r: 0.55 }), 1.25, -1.05, 0.1, [0, 0, 0.35]));
+  });
+}
+
+async function buildFromGLB(url) {
+  const gltf = await new GLTFLoader().loadAsync(url);
+  const model = gltf.scene; root.add(model);
+  const box = new THREE.Box3().setFromObject(model);
+  const size = box.getSize(new THREE.Vector3()).length();
+  model.scale.setScalar(8 / size);
+  model.position.sub(box.getCenter(new THREE.Vector3()).multiplyScalar(8 / size)).add(new THREE.Vector3(0, 1.2, 0));
+  for (const [id, name] of Object.entries(manifestNames)) {
+    const node = model.getObjectByName(id);
+    if (!node) continue;
+    parts[id] = node; labels[id] = name; node.userData.home = node.position.clone();
+    node.traverse(o => { if (o.isMesh) { o.userData.partId = id; o.userData.baseMat = o.material; } });
+  }
+}
+
+// ------------------------------------------------------------------ visual state
+const state = { solid: new Set(), ghost: new Set(), explode: 0, explodeTarget: 0, focus: null };
+const SOLID = new THREE.Color(0x22d3ee), GHOST = new THREE.Color(0xf5a524), BLACK = new THREE.Color(0x000000);
+let manifestNames = {};
+
+function center(id) {
+  const box = new THREE.Box3().setFromObject(parts[id]); return box.getCenter(new THREE.Vector3());
+}
+const assemblyCenter = new THREE.Vector3(0, 1.6, 0);
+function applyMaterials(t) {
+  const anyActive = state.solid.size || state.ghost.size;
+  for (const [id, g] of Object.entries(parts)) {
+    const mode = state.solid.has(id) ? "solid" : state.ghost.has(id) ? "ghost" : null;
+    g.traverse(o => {
+      if (!o.isMesh) return;
+      if (!o.userData.hlMat) { o.userData.hlMat = o.userData.baseMat.clone(); o.userData.hlMat.transparent = true; }
+      const m = o.userData.hlMat, base = o.userData.baseMat;
+      m.color.copy(base.color);
+      const glow = (c, i) => { if (m.emissive) { m.emissive.copy(c); m.emissiveIntensity = i; } };
+      if (mode === "solid") {
+        glow(SOLID, 0.55 + 0.25 * Math.sin(t * 4)); m.opacity = 1;
+      } else if (mode === "ghost") {
+        glow(GHOST, 0.35 + 0.3 * Math.sin(t * 7)); m.opacity = 0.8;
+      } else {
+        glow(BLACK, 0); m.opacity = anyActive ? Math.min(base.opacity, 0.28) : base.opacity;
+      }
+      m.depthWrite = !anyActive || !!mode;
+      o.material = m;
+    });
+  }
+}
+function applyExplode() {
+  state.explode += (state.explodeTarget - state.explode) * 0.08;
+  for (const [id, g] of Object.entries(parts)) {
+    const dir = center(id).sub(assemblyCenter); dir.y *= 1.25;
+    if (dir.lengthSq() < 0.01) dir.set(0, -1, 0);
+    g.position.copy(g.userData.home).addScaledVector(dir.normalize(), state.explode * 2.6);
+  }
+}
+
+// camera tween
+let camTween = null;
+function flyTo(target, distance = 5.5) {
+  const dir = camera.position.clone().sub(controls.target).normalize();
+  camTween = { t: 0, fromPos: camera.position.clone(), fromTarget: controls.target.clone(),
+    toTarget: target.clone(), toPos: target.clone().addScaledVector(dir, distance) };
+  controls.autoRotate = false;
+}
+function home() {
+  camTween = { t: 0, fromPos: camera.position.clone(), fromTarget: controls.target.clone(),
+    toTarget: HOME.target.clone(), toPos: HOME.pos.clone() };
+  controls.autoRotate = true;
+}
+
+// floating tags
+const tagHost = document.getElementById("tags");
+function syncTags() {
+  const want = [...state.solid].map(id => [id, "solid"]).concat([...state.ghost].filter(id => !state.solid.has(id)).map(id => [id, "ghost"]));
+  const keep = new Set(want.map(([id, m]) => `${id}:${m}`));
+  for (const el of [...tagHost.children]) if (!keep.has(el.dataset.key)) el.remove();
+  for (const [id, mode] of want) {
+    const k = `${id}:${mode}`;
+    if (!tagHost.querySelector(`[data-key="${k}"]`)) {
+      const el = document.createElement("div"); el.className = `tag ${mode}`; el.dataset.key = k; el.dataset.id = id;
+      el.textContent = labels[id] || id; tagHost.appendChild(el);
+    }
+  }
+}
+function placeTags() {
+  const rect = host.getBoundingClientRect();
+  for (const el of tagHost.children) {
+    const g = parts[el.dataset.id]; if (!g) continue;
+    const box = new THREE.Box3().setFromObject(g);
+    const p = box.getCenter(new THREE.Vector3()); p.y = box.max.y;
+    p.project(camera);
+    el.style.left = `${(p.x * 0.5 + 0.5) * rect.width}px`;
+    el.style.top = `${(-p.y * 0.5 + 0.5) * rect.height}px`;
+  }
+}
+
+const clock = new THREE.Clock();
+function frame() {
+  const t = clock.getElapsedTime();
+  if (camTween) {
+    camTween.t = Math.min(1, camTween.t + 0.025);
+    const e = 1 - Math.pow(1 - camTween.t, 3);
+    camera.position.lerpVectors(camTween.fromPos, camTween.toPos, e);
+    controls.target.lerpVectors(camTween.fromTarget, camTween.toTarget, e);
+    if (camTween.t >= 1) camTween = null;
+  }
+  parts.hotend_fan?.userData.spin && (parts.hotend_fan.userData.spin.rotation.z += 0.25);
+  applyExplode(); applyMaterials(t); controls.update(); renderer.render(scene, camera); placeTags();
+  requestAnimationFrame(frame);
+}
+
+// ------------------------------------------------------------------ actions
+const actions = {
+  highlight({ part_id, mode }) {
+    if (!parts[part_id]) return;
+    if (mode === "ghost") { state.ghost.add(part_id); }
+    else { state.solid = new Set([part_id]); state.ghost.delete(part_id); state.ghost.clear(); }
+    syncTags();
+  },
+  clear_ghost({ part_ids }) { (part_ids || [...state.ghost]).forEach(id => state.ghost.delete(id)); syncTags(); },
+  focus({ part_id }) { if (parts[part_id]) flyTo(center(part_id), 8 + state.explode * 4); },
+  explode({ part_id }) {
+    state.explodeTarget = 1;
+    if (part_id && parts[part_id]) { state.solid = new Set([part_id]); syncTags(); flyTo(center(part_id), 12); }
+    else { state.solid.clear(); state.ghost.clear(); syncTags(); flyTo(assemblyCenter, 19); }
+  },
+  reset() { state.solid.clear(); state.ghost.clear(); state.explodeTarget = 0; syncTags(); home(); hideStep(); },
+  step(e) {
+    state.solid = new Set((e.part_ids || []).filter(id => parts[id])); state.ghost.clear(); syncTags();
+    if (state.solid.size) {
+      const c = new THREE.Vector3(); state.solid.forEach(id => c.add(center(id))); c.divideScalar(state.solid.size);
+      flyTo(c, 9 + state.explode * 4);
+    }
+    showStep(e);
+  },
+};
+
+// ------------------------------------------------------------------ panel
+const $ = id => document.getElementById(id);
+const log = $("log");
+function addLog(el) { log.appendChild(el); log.scrollTop = log.scrollHeight; while (log.children.length > 80) log.firstChild.remove(); }
+function addMsg(who, text) { const d = document.createElement("div"); d.className = `msg ${who}`; d.textContent = text; addLog(d); }
+let captionTimer;
+function caption(who, text) {
+  clearTimeout(captionTimer);
+  const c = $("caption");
+  if (!text) { c.classList.add("empty"); return; }
+  c.className = `caption ${who}`; $("captionWho").textContent = who === "agent" ? "Netra" : "You"; $("captionText").textContent = text;
+  captionTimer = setTimeout(() => c.classList.add("empty"), who === "agent" ? 9000 : 4000);
+}
+function showStep(e) {
+  $("step").classList.add("show"); $("stepProc").textContent = e.procedure; $("stepInstr").textContent = e.instruction;
+  $("stepCount").textContent = `${e.step}/${e.total}`;
+  $("stepDots").innerHTML = Array.from({ length: e.total }, (_, i) => `<i class="${i + 1 < e.step ? "done" : i + 1 === e.step ? "cur" : ""}"></i>`).join("");
+}
+function hideStep() { $("step").classList.remove("show"); }
+const STATUS = { listening: 'Listening — say "Hey Netra"', connecting: "Waking up…", active: "Netra is listening", offline: "Engine offline — retrying" };
+function setStatus(s, err) { $("status").dataset.state = s; $("statusText").textContent = err || STATUS[s] || s; }
+
+function handle(e) {
+  switch (e.type) {
+    case "manifest":
+      manifestNames = Object.fromEntries(e.parts.map(p => [p.id, p.name]));
+      $("machine").innerHTML = `${e.name}<small>${e.parts.length} parts · live 3D model</small>`;
+      buildDemo(); break;
+    case "status": setStatus(e.state, e.error); break;
+    case "partial": if (e.text) caption("user", e.text); break;
+    case "transcript": addMsg(e.who, e.text); caption(e.who, e.text); break;
+    case "tool": {
+      if (e.phase !== "result") {
+        const d = document.createElement("div"); d.className = "tool";
+        d.innerHTML = `→ <b>${e.name}</b>(${escapeHtml(JSON.stringify(e.args || {}))})`; addLog(d); break;
+      }
+      const d = document.createElement("div"); d.className = "tool";
+      d.innerHTML = e.speculative
+        ? `<span class="spec">⚡ ${e.name} ready from speculation · started ${e.lead_ms}ms early</span>`
+        : `<span class="ms">✓ ${e.name} · ${e.ms}ms</span>`;
+      addLog(d); break;
+    }
+    case "spec": {
+      const last = $("sLast");
+      if (e.kind === "fire") { last.className = "last"; last.textContent = `⋯ predicting ${e.tool} · ${e.label}`; }
+      if (e.kind === "ready") { last.className = "last"; last.textContent = `⋯ ${e.tool} pre-fetched in ${e.ms}ms`; }
+      if (e.kind === "hit") { last.className = "last hit"; last.textContent = `✓ hit · ${e.tool} · ${e.lead_ms}ms head start`; }
+      if (e.kind === "miss") { last.className = "last miss"; last.textContent = `✗ miss · ${e.tool} · ${e.label}`; }
+      break;
+    }
+    case "spec_stats":
+      $("sFired").textContent = e.fired; $("sHits").textContent = e.hits; $("sMiss").textContent = e.misses;
+      $("sLead").textContent = e.hits ? `${e.avg_lead_ms} ms` : "—"; break;
+    case "sources":
+      $("sources").classList.add("show");
+      $("sourceList").innerHTML = e.results.map(r =>
+        `<a class="src" href="${escapeAttr(r.url)}" target="_blank" rel="noopener"><div class="t">${escapeHtml(r.title || r.url)}</div><div class="u">${escapeHtml(r.url)}</div></a>`).join("");
+      break;
+    default: actions[e.type]?.(e);
+  }
+}
+const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const escapeAttr = s => /^https?:\/\//.test(s) ? escapeHtml(s) : "#";
+
+// demo buttons (?demo): drive the viewer by hand, e.g. to rehearse or if voice is unavailable
+function buildDemo() {
+  if (!new URLSearchParams(location.search).has("demo")) return;
+  const d = $("demo"); d.classList.add("show"); d.innerHTML = "";
+  const add = (label, ev) => { const b = document.createElement("button"); b.textContent = label; b.onclick = () => handle(ev); d.appendChild(b); };
+  for (const [id, name] of Object.entries(manifestNames)) add(name, { type: "highlight", part_id: id, mode: "solid" });
+  add("ghost nozzle", { type: "highlight", part_id: "nozzle", mode: "ghost" });
+  add("explode", { type: "explode", part_id: null }); add("reset", { type: "reset" });
+}
+
+// click a part to name it
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+renderer.domElement.addEventListener("click", ev => {
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  const hit = ray.intersectObjects(root.children, true).find(h => h.object.userData.partId);
+  if (hit) handle({ type: "highlight", part_id: hit.object.userData.partId, mode: "solid" });
+});
+
+// ------------------------------------------------------------------ connection
+let wsRetry = 500;
+function connect() {
+  const ws = new WebSocket(`ws://${location.hostname || "127.0.0.1"}:8766`);
+  ws.onopen = () => { wsRetry = 500; setStatus("listening"); };
+  ws.onmessage = m => { try { handle(JSON.parse(m.data)); } catch (err) { console.error(err, m.data); } };
+  ws.onclose = () => { setStatus("offline"); setTimeout(connect, wsRetry = Math.min(wsRetry * 2, 4000)); };
+}
+
+window.netra = { handle }; // for scripted rehearsal from the console
+
+const params = new URLSearchParams(location.search);
+if (params.get("model")) await buildFromGLB(params.get("model")).catch(err => { console.error(err); buildProcedural(); });
+else buildProcedural();
+applyMaterials(0);
+frame();
+connect();
+</script>
+</body>
+</html>

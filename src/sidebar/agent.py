@@ -1,14 +1,19 @@
 """
 Voice Agent API client: the mouth and brain.
 
-Manages the WebSocket connection to AssemblyAI's Voice Agent API.
-Sends audio, receives replies, handles tool calls, and supports
-mid-session context updates via session.update.
+Manages the WebSocket connection to AssemblyAI's Voice Agent API: streams mic
+audio in, plays replies out, runs client-side tools, and pushes transcripts and
+tool activity to the viewer.
 
-Integrates with speculative execution: the engine can cache a
-pre-computed tool result; when the agent fires a matching tool.call,
-the cached result is used instantly instead of re-executing.
+Tool results follow the documented protocol: a result is sent only while
+reply.done is the latest turn event (not during reply.started /
+input.speech.started), and results are dropped when a reply is interrupted.
+
+Speculative execution: on tool.call the speculator is asked to claim() a
+result it already started from the user's partial transcript.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
@@ -17,74 +22,82 @@ import time
 import websockets
 
 from . import config
-from .tools import TOOL_DEFINITIONS, execute_tool
+from .tools import execute_tool, tool_definitions, web_tools_enabled
+
+_COMMON_WORDS = {"motor", "gears", "gear", "fins", "tip", "heater", "cartridge", "idler", "fan",
+                 "blower", "throat", "cold end", "print fan", "cooling fan", "clicking", "jam"}
+
+
+def build_session(sight=None, room_context: str = "") -> dict:
+    """The session.update payload. Shared by the live agent and the test harness."""
+    session = {
+        "system_prompt": config.build_system_prompt(sight, web_tools_enabled(), room_context),
+        "greeting": "",  # must be a string: None silently invalidates the whole session.update
+        "output": {"voice": config.DEFAULT_VOICE},
+        "tools": tool_definitions(sight),
+    }
+    manifest = getattr(sight, "manifest", None)
+    if manifest is not None:
+        terms = ["Netra"]
+        for part in manifest.parts:
+            terms += [str(part.get("name")), *map(str, part.get("aliases", []))]
+        terms += [str(v.get("term")) for v in manifest.vocab]
+        terms = [t for t in dict.fromkeys(terms) if t and t.lower() not in _COMMON_WORDS]
+        parts = ", ".join(str(p.get("name")) for p in manifest.parts)
+        session["input"] = {
+            "keyterms": terms[:100],
+            "transcription_prompt": (
+                f"Someone working hands-on with a {manifest.name}, talking to a voice assistant "
+                f"named Netra. They name parts such as {parts}, and describe problems like "
+                "clogs, clicking, under-extrusion, heat creep, thermal runaway and cold pulls."
+            )[:1750],
+        }
+    return session
 
 
 class AgentClient:
-    def __init__(self, audio_io, sight=None):
+    def __init__(self, audio_io, sight=None, hub=None, speculator=None, initial_user_text: str | None = None):
         self._audio_io = audio_io
         self._sight = sight
+        self._hub = hub
+        self._speculator = speculator
+        self._initial_user_text = initial_user_text
+        self.session_error: str | None = None
         self._ws = None
         self._audio_queue: asyncio.Queue | None = None
         self._connected = False
         self._ready_event = asyncio.Event()
         self._connection_closed = asyncio.Event()
         self._session_id: str | None = None
-        self._speculative_cache: dict | None = None
+        self._turn_state = ""  # latest of reply.started / input.speech.started / reply.done
         self._tool_tasks: dict[str, asyncio.Task] = {}
-        self._tool_results: dict[str, str] = {}
-        self._tool_batch_ids: list[str] = []
-        self._tool_reply_done = False
-        self._last_event_type = ""
-        self._flushing_tool_results = False
-
-    def _system_prompt(self, room_context: str = "") -> str:
-        manifest = getattr(self._sight, "manifest", None)
-        visual_context = manifest.context() if manifest else "(no manifest configured)"
-        prompt = (
-            f"{config.DEFAULT_SYSTEM_PROMPT}\n\n"
-            f"## Active visual field\nAdapter: {getattr(self._sight, 'name', 'unknown')}\n"
-            f"Manifest: {visual_context}"
-        )
-        if room_context:
-            prompt += f"\n\n## Current conversation context\n{room_context}"
-        return prompt
+        self._ready_results: dict[str, str] = {}
+        self._send_lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
         return self._connected
 
-    def cache_speculative_result(self, tool_name: str, arguments: str, result: str):
-        self._speculative_cache = {
-            "tool_name": tool_name,
-            "arguments": arguments,
-            "result": result,
-            "cached_at": time.monotonic(),
-        }
+    def _emit(self, event: dict):
+        if self._hub:
+            self._hub.broadcast(event)
 
-    def clear_speculative_cache(self):
-        self._speculative_cache = None
+    async def _send(self, payload: dict):
+        if not self._ws:
+            return
+        async with self._send_lock:
+            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+
+    # ---------- connection ----------
 
     async def connect(self, stop_event: asyncio.Event):
         self._ready_event.clear()
         self._connection_closed.clear()
         headers = {"Authorization": f"Bearer {config.API_KEY}"}
 
-        async with websockets.connect(
-            config.AGENT_WS_URL, additional_headers=headers
-        ) as ws:
+        async with websockets.connect(config.AGENT_WS_URL, additional_headers=headers) as ws:
             self._ws = ws
-
-            await ws.send(json.dumps({
-                "type": "session.update",
-                "session": {
-                    "system_prompt": self._system_prompt(),
-                    "greeting": "",
-                    "output": {"voice": config.DEFAULT_VOICE},
-                    "tools": TOOL_DEFINITIONS,
-                },
-            }))
-
+            await self._send({"type": "session.update", "session": build_session(self._sight)})
             self._audio_queue = self._audio_io.subscribe_agent()
 
             receive_task = asyncio.create_task(self._receive_loop(stop_event))
@@ -97,7 +110,7 @@ class AgentClient:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(receive_task, send_task, return_exceptions=True)
-                self._discard_pending_tool_results()
+                self._drop_tool_calls()
                 if self._audio_queue is not None:
                     self._audio_io.unsubscribe_agent(self._audio_queue)
                     self._audio_queue = None
@@ -109,17 +122,10 @@ class AgentClient:
                     await asyncio.wait_for(self._ready_event.wait(), timeout=0.25)
                 except asyncio.TimeoutError:
                     continue
-                if self._connection_closed.is_set():
-                    break
             try:
-                b64_audio = await asyncio.wait_for(
-                    self._audio_queue.get(), timeout=0.5
-                )
-                if self._ws and self._connected:
-                    await self._ws.send(json.dumps({
-                        "type": "input.audio",
-                        "audio": b64_audio,
-                    }))
+                b64_audio = await asyncio.wait_for(self._audio_queue.get(), timeout=0.5)
+                if self._connected:
+                    await self._send({"type": "input.audio", "audio": b64_audio})
             except asyncio.TimeoutError:
                 continue
             except websockets.ConnectionClosed:
@@ -130,170 +136,183 @@ class AgentClient:
             async for raw_msg in self._ws:
                 if stop_event.is_set():
                     break
-
                 msg = json.loads(raw_msg)
-                msg_type = msg.get("type", "")
-                self._last_event_type = msg_type
-
-                if msg_type == "session.ready":
-                    self._session_id = msg.get("session_id", "?")
-                    self._connected = True
-                    while self._audio_queue is not None:
-                        try:
-                            self._audio_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                    self._ready_event.set()
-                    print(f"[agent] session ready — id: {self._session_id}")
-
-                elif msg_type == "session.error":
-                    print(f"  [agent session error] {msg.get('code', '')}: {msg.get('message', msg)}")
+                if await self._handle_event(msg) is False:
                     break
-
-                elif msg_type == "transcript.user.delta":
-                    pass
-
-                elif msg_type == "transcript.user":
-                    text = msg.get("text", "")
-                    if text.strip():
-                        print(f"  \033[1m[you → agent]\033[0m {text}")
-
-                elif msg_type == "transcript.agent":
-                    text = msg.get("text", "")
-                    print(f"  \033[1;34m[agent]\033[0m {text}")
-
-                elif msg_type == "reply.audio":
-                    self._audio_io.play_audio(msg.get("data", ""))
-
-                elif msg_type == "reply.done":
-                    self._audio_io.mark_agent_done_speaking()
-                    status = msg.get("status", "")
-                    if status == "interrupted":
-                        print("  [agent interrupted]")
-                        self.clear_speculative_cache()
-                        self._discard_pending_tool_results()
-                    else:
-                        self._tool_reply_done = bool(self._tool_batch_ids)
-                        await self._send_pending_tool_results()
-
-                elif msg_type == "input.speech.started" and self._tool_reply_done:
-                    self._discard_pending_tool_results()
-
-                elif msg_type == "tool.call":
-                    call_id = msg.get("call_id", "")
-                    name = msg.get("name", "")
-                    arguments = msg.get("arguments", "{}")
-                    self._handle_tool_call(call_id, name, arguments)
-
-                elif msg_type == "error":
-                    print(f"  [agent error] {msg.get('message', msg)}")
-
         except websockets.ConnectionClosed:
             pass
         finally:
             self._connected = False
             self._connection_closed.set()
 
+    async def _handle_event(self, msg: dict) -> bool | None:
+        t = msg.get("type", "")
+
+        if t == "session.ready":
+            self._session_id = msg.get("session_id", "?")
+            registered = len(msg.get("config", {}).get("tools", []) or [])
+            self._connected = True
+            while self._audio_queue is not None:
+                try:
+                    self._audio_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            self._ready_event.set()
+            print(f"[agent] session ready — id: {self._session_id} ({registered} tools)")
+            if self._initial_user_text:
+                # The wake turn ("Hey Netra, where's the nozzle?") was heard before this socket
+                # existed; hand it over so the first question gets answered.
+                await self.say_as_user(self._initial_user_text)
+            else:
+                await self._send({"type": "reply.create", "instructions":
+                                  "Let the user know you're listening, in five words or fewer."})
+
+        elif t == "session.error":
+            self.session_error = msg.get("code") or "error"
+            print(f"  [agent session error] {msg.get('code', '')}: {msg.get('message', msg)}")
+            if not self._connected:
+                return False
+
+        elif t == "session.ended":
+            return False
+
+        elif t in ("reply.started", "input.speech.started"):
+            self._turn_state = t
+
+        elif t == "transcript.user":
+            text = msg.get("text", "")
+            if text.strip():
+                print(f"  \033[1m[you → agent]\033[0m {text}")
+                self._emit({"type": "transcript", "who": "user", "text": text})
+
+        elif t == "transcript.agent":
+            text = msg.get("text", "")
+            print(f"  \033[1;34m[agent]\033[0m {text}")
+            if text.strip():
+                self._emit({"type": "transcript", "who": "agent", "text": text})
+
+        elif t == "reply.audio":
+            self._audio_io.play_audio(msg.get("data", ""))
+
+        elif t == "reply.done":
+            self._turn_state = t
+            self._audio_io.mark_agent_done_speaking()
+            if msg.get("status") == "interrupted":
+                print("  [agent interrupted]")
+                self._drop_tool_calls()
+            else:
+                await self._flush_if_idle()
+
+        elif t == "tool.call":
+            self._handle_tool_call(msg.get("call_id", ""), msg.get("name", ""), msg.get("arguments", "{}"))
+
+        elif t == "error":
+            print(f"  [agent error] {msg.get('message', msg)}")
+        return None
+
+    # ---------- tools ----------
+
     def _handle_tool_call(self, call_id: str, name: str, arguments):
-        if not self._tool_batch_ids:
-            self._tool_reply_done = False
-        self._tool_batch_ids.append(call_id)
-        cached = self._speculative_cache
-        if (cached and cached["tool_name"] == name
-                and self._normalize_arguments(cached["arguments"])
-                == self._normalize_arguments(arguments)):
-            age_ms = (time.monotonic() - cached["cached_at"]) * 1000
-            self._tool_results[call_id] = cached["result"]
-            self._speculative_cache = None
-            print(f"  \033[1;32m[tool — speculative hit!]\033[0m {name} (cached {age_ms:.0f}ms ago)")
+        self._emit({"type": "tool", "name": name, "args": _parse_arguments(arguments), "phase": "call"})
+        hit = self._speculator.claim(name, arguments) if self._speculator else None
+        if hit is not None:
+            print(f"  \033[1;32m[tool — speculative hit!]\033[0m {name} started {hit.lead_ms:.0f}ms "
+                  f"before the agent asked" + ("" if hit.ready else " (still finishing)"))
+            if self._sight is not None and name in {"locate", "describe", "point", "walk_through"}:
+                # Speculation only showed a ghost; the cheap local call commits the visual state.
+                asyncio.create_task(asyncio.to_thread(execute_tool, name, arguments, self._sight))
+            coro = self._await_speculation(name, hit)
         else:
-            if cached:
-                print(f"  \033[1;31m[tool — spec miss]\033[0m expected {cached['tool_name']} with matching arguments, got {name}")
-                self._speculative_cache = None
             print(f"  [tool] {name}({arguments})")
-            task = asyncio.create_task(self._execute_tool(name, arguments))
-            self._tool_tasks[call_id] = task
-            task.add_done_callback(lambda finished, cid=call_id: self._tool_finished(cid, finished))
+            coro = self._execute_tool(name, arguments)
+        task = asyncio.create_task(coro)
+        self._tool_tasks[call_id] = task
+        task.add_done_callback(lambda finished, cid=call_id: self._tool_finished(cid, finished))
 
     async def _execute_tool(self, name: str, arguments) -> str:
+        started = time.monotonic()
         try:
             result = await asyncio.to_thread(execute_tool, name, arguments, self._sight)
-            print(f"  [tool → agent] {result}")
-            return result
         except Exception as exc:
-            return f"Tool execution failed: {exc}"
+            result = f"Tool execution failed: {exc}"
+        elapsed = (time.monotonic() - started) * 1000
+        print(f"  [tool → agent] {result[:300]} ({elapsed:.0f}ms)")
+        self._emit({"type": "tool", "name": name, "phase": "result", "ms": round(elapsed)})
+        return result
+
+    async def _await_speculation(self, name: str, hit) -> str:
+        started = time.monotonic()
+        if not hit.ready:
+            await asyncio.to_thread(hit.done.wait, 30)
+        waited = (time.monotonic() - started) * 1000
+        self._emit({"type": "tool", "name": name, "phase": "result", "ms": round(waited),
+                    "speculative": True, "lead_ms": round(hit.lead_ms)})
+        return hit.result or "Speculative tool call produced no result."
 
     def _tool_finished(self, call_id: str, task: asyncio.Task):
         self._tool_tasks.pop(call_id, None)
         if task.cancelled():
             return
         try:
-            self._tool_results[call_id] = task.result()
+            self._ready_results[call_id] = task.result()
         except Exception as exc:
-            self._tool_results[call_id] = f"Tool execution failed: {exc}"
-        if self._tool_reply_done and self._last_event_type == "reply.done":
-            asyncio.create_task(self._send_pending_tool_results())
+            self._ready_results[call_id] = f"Tool execution failed: {exc}"
+        asyncio.create_task(self._flush_if_idle())
 
-    async def _send_pending_tool_results(self):
-        """Send completed tool results only after the matching reply.done."""
-        if (not self._ws or not self._tool_reply_done
-                or self._last_event_type != "reply.done" or not self._tool_batch_ids
-                or self._flushing_tool_results):
+    async def _flush_if_idle(self):
+        """Send ready tool results, but only while reply.done is the latest turn event."""
+        if self._turn_state != "reply.done" or not self._ready_results:
             return
-        if any(call_id not in self._tool_results for call_id in self._tool_batch_ids):
-            return
-        pending = [(call_id, self._tool_results[call_id]) for call_id in self._tool_batch_ids]
-        self._flushing_tool_results = True
+        pending, self._ready_results = self._ready_results, {}
         try:
-            for call_id, result in pending:
-                await self._ws.send(json.dumps({
-                    "type": "tool.result",
-                    "call_id": call_id,
-                    "result": json.dumps({"result": result}, ensure_ascii=False),
-                }))
-            self._clear_tool_batch()
+            for call_id, result in pending.items():
+                await self._send({"type": "tool.result", "call_id": call_id,
+                                  "result": json.dumps({"result": result}, ensure_ascii=False)})
         except websockets.ConnectionClosed:
-            self._discard_pending_tool_results()
-        finally:
-            self._flushing_tool_results = False
+            pass
 
-    @staticmethod
-    def _normalize_arguments(arguments) -> str:
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                pass
-        return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
-
-    def _clear_tool_batch(self):
+    def _drop_tool_calls(self):
         for task in self._tool_tasks.values():
             task.cancel()
         self._tool_tasks.clear()
-        self._tool_results.clear()
-        self._tool_batch_ids.clear()
-        self._tool_reply_done = False
+        self._ready_results.clear()
 
-    def _discard_pending_tool_results(self):
-        self._clear_tool_batch()
+    # ---------- context ----------
+
+    async def say_as_user(self, text: str):
+        """Inject a user utterance and ask the agent to answer it now."""
+        # conversation.message(role=user) alone does not reach the model; reply.create
+        # instructions do, and the exchange stays in the conversation history.
+        try:
+            await self._send({"type": "reply.create", "instructions":
+                              f'The user just said: "{text}". Treat this exactly as if they had spoken it: '
+                              "reply to it now, following your system prompt and calling tools as usual."})
+            self._emit({"type": "transcript", "who": "user", "text": text})
+        except websockets.ConnectionClosed:
+            pass
 
     async def update_context(self, room_summary: str):
         if not self._ws or not self._connected:
             return
         try:
-            await self._ws.send(json.dumps({
-                "type": "session.update",
-                "session": {
-                    "system_prompt": self._system_prompt(room_summary),
-                },
-            }))
+            await self._send({"type": "session.update", "session": {
+                "system_prompt": config.build_system_prompt(self._sight, web_tools_enabled(), room_summary)}})
         except websockets.ConnectionClosed:
             pass
 
     async def disconnect(self):
         if self._ws:
             try:
-                await self._ws.send(json.dumps({"type": "session.end"}))
+                await self._send({"type": "session.end"})
             except websockets.ConnectionClosed:
                 pass
             self._connected = False
+
+
+def _parse_arguments(arguments):
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments) if arguments else {}
+        except json.JSONDecodeError:
+            return {"raw": arguments}
+    return arguments or {}

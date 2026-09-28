@@ -56,8 +56,10 @@ class StreamingListener:
         audio_queue: asyncio.Queue,
         on_partial_turn: Callable[[Turn], None] | None = None,
         on_final_turn: Callable[[Turn], None] | None = None,
+        keyterms: list[str] | None = None,
     ):
         self._audio_queue = audio_queue
+        self._keyterms = ["Netra", "Hey Netra", *(keyterms or [])][:100]
         self._on_partial_turn = on_partial_turn
         self._on_final_turn = on_final_turn
         self._transcript = RoomTranscript()
@@ -104,7 +106,7 @@ class StreamingListener:
                 sample_rate=config.STREAMING_SAMPLE_RATE,
                 speech_model="universal-3-5-pro",
                 speaker_labels=True,
-                keyterms_prompt=["Netra", "Hey Netra"],
+                keyterms_prompt=self._keyterms,
             )
         )
 

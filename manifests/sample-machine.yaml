@@ -1,23 +1,126 @@
 manifest:
   domain: physical_machine
   name: Prusa MK4 Extruder
-  source: ../assets/prusa-mk4.glb
+  # No GLB shipped: the viewer builds a procedural model whose mesh names match the part ids below.
+  # Point this at a .glb (node names = part ids) to use a real model instead.
+  source: procedural:extruder
   parts:
-    - id: hotend
-      name: hotend
-      aliases: [nozzle assembly, heater block]
-      description: Heats and melts filament before it passes through the nozzle.
-      safety: Allow the hotend to cool before touching it.
     - id: extruder_motor
       name: extruder motor
-      aliases: [drive motor, clicking motor]
-      description: Drives filament into the hotend through the gears.
+      aliases: [stepper motor, drive motor, clicking motor, motor]
+      description: Stepper motor that turns the drive gears to push filament toward the hotend.
+    - id: gearbox
+      name: drive gears
+      aliases: [gearbox, planetary gearbox, extruder gears, drive gear, gears, hobbed gear]
+      description: Gear set that grips the filament and pushes it down. Debris or ground filament here causes slipping and clicking.
+    - id: idler_lever
+      name: idler lever
+      aliases: [idler, idler door, tension lever, idler arm, tension screw]
+      description: Spring-loaded lever that presses the filament against the drive gear. Too loose slips, too tight flattens filament.
+    - id: filament_sensor
+      name: filament sensor
+      aliases: [runout sensor, filament runout sensor]
+      description: Detects whether filament is loaded and pauses the print on runout.
+    - id: ptfe_tube
+      name: PTFE tube
+      aliases: [bowden tube, feed tube, filament tube, teflon tube]
+      description: Low-friction tube that guides filament into the extruder.
+    - id: heatsink
+      name: heatsink
+      aliases: [cold end, heat sink, fins]
+      description: Finned aluminium block that keeps the top of the heatbreak cool so filament only melts in the hotend.
+    - id: hotend_fan
+      name: hotend fan
+      aliases: [heatsink fan, cold end fan]
+      description: Always-on fan that cools the heatsink. If it fails, filament softens too early and jams (heat creep).
+    - id: heatbreak
+      name: heatbreak
+      aliases: [heat break, throat]
+      description: Thin-walled tube between heatsink and heater block that limits heat travelling upward.
+      safety: Can be hot during and shortly after printing.
+    - id: hotend
+      name: heater block
+      aliases: [hotend, hot end, heat block, heater]
+      description: Aluminium block holding the heater cartridge and thermistor; melts the filament.
+      safety: Runs around 200 to 290 degrees Celsius. Let it cool below 50 degrees before touching it.
+    - id: heater_cartridge
+      name: heater cartridge
+      aliases: [heating element, cartridge, heater cartridge]
+      description: Resistive heater inside the heater block.
+      safety: Power off the printer before handling heater wiring.
+    - id: thermistor
+      name: thermistor
+      aliases: [temperature sensor, temp sensor, thermal sensor]
+      description: Measures hotend temperature. A loose or damaged thermistor causes temperature errors or thermal runaway.
+      safety: Power off the printer before handling sensor wiring.
+    - id: nozzle
+      name: nozzle
+      aliases: [tip, brass nozzle, extruder nozzle]
+      description: Threaded tip where molten filament exits; commonly 0.4 millimetres.
+      safety: Extremely hot when printing. Never touch it bare-handed.
+    - id: print_fan
+      name: part cooling fan
+      aliases: [print fan, layer fan, cooling fan, blower, blower fan]
+      description: Blower that cools freshly printed plastic for sharper overhangs and bridges.
   vocab:
     - term: cold pull
-      maps_to: hotend
+      maps_to: nozzle
+    - term: heat creep
+      maps_to: heatbreak
+    - term: under extrusion
+      maps_to: gearbox
+    - term: thermal runaway
+      maps_to: thermistor
+    - term: clicking
+      maps_to: extruder_motor
+    - term: stringing
+      maps_to: nozzle
+    - term: jam
+      maps_to: heatbreak
   procedures:
     - name: inspect a clicking extruder
+      aliases: [clicking, skipping, grinding extruder, extruder clicking]
       steps:
-        - Pause the print and let the hotend cool before touching hardware.
-        - Check that the spool can unwind freely.
-        - Inspect the filament path and extruder gears for debris.
+        - text: Pause the print and let the hotend cool before touching any hardware.
+          parts: [hotend, nozzle]
+        - text: Check that the spool unwinds freely and the PTFE tube isn't kinked.
+          parts: [ptfe_tube]
+        - text: Open the idler lever and look at the drive gears for ground-up filament dust. Brush it out.
+          parts: [idler_lever, gearbox]
+        - text: Check the hotend fan is spinning. A dead fan causes heat creep, which jams the heatbreak and makes the motor click.
+          parts: [hotend_fan, heatbreak]
+        - text: If it still clicks, the nozzle is probably partially clogged. Do a cold pull.
+          parts: [nozzle]
+    - name: clear a clogged nozzle with a cold pull
+      aliases: [clogged nozzle, cold pull, nozzle clog, blocked nozzle, unclog]
+      steps:
+        - text: Heat the nozzle to printing temperature and push some filament through by hand.
+          parts: [nozzle, hotend]
+        - text: Let it cool to about 90 degrees for PLA while keeping gentle pressure on the filament.
+          parts: [hotend]
+        - text: Open the idler lever and pull the filament out firmly in one motion.
+          parts: [idler_lever, gearbox]
+        - text: Check the tip. A clean cone shaped like the nozzle means it worked; repeat if you see dark debris.
+          parts: [nozzle]
+    - name: replace the nozzle
+      aliases: [nozzle swap, change nozzle, new nozzle, swap nozzle]
+      steps:
+        - text: Heat the hotend to 250 degrees; nozzles must be changed hot so the threads don't seize.
+          parts: [hotend, nozzle]
+        - text: Hold the heater block steady with a wrench so you don't twist the heatbreak.
+          parts: [hotend, heatbreak]
+        - text: Unscrew the old nozzle with a nozzle wrench and set it on a heat-safe surface.
+          parts: [nozzle]
+        - text: Screw in the new nozzle snugly while hot, without over-tightening, then re-run calibration.
+          parts: [nozzle]
+    - name: diagnose a temperature error
+      aliases: [thermal runaway, temperature error, heating failed, temp error, mintemp, maxtemp]
+      steps:
+        - text: Power off the printer and let the hotend cool before touching any wiring.
+          parts: [hotend]
+        - text: Check the thermistor is fully seated in the heater block and its wires aren't pinched.
+          parts: [thermistor, hotend]
+        - text: Check the heater cartridge wires for damage near the heater block.
+          parts: [heater_cartridge]
+        - text: Make sure the part cooling fan isn't blowing directly onto the heater block; use the silicone sock.
+          parts: [print_fan, hotend]

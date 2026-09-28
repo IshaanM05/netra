@@ -11,7 +11,7 @@ import os
 import time
 
 import httpx
-from .sight import TOOL_DEFINITIONS as SIGHT_TOOL_DEFINITIONS
+from .sight import SIGHT_TOOLS, TOOL_DEFINITIONS as SIGHT_TOOL_DEFINITIONS
 
 TOOL_DEFINITIONS = [
     {
@@ -74,15 +74,53 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-TOOL_DEFINITIONS = TOOL_DEFINITIONS + SIGHT_TOOL_DEFINITIONS + [{
-    "type": "function", "name": "search_live",
-    "description": "Search the live web for current information or trusted service documentation.",
-    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-}, {
-    "type": "function", "name": "scrape_live",
-    "description": "Fetch and extract useful content from a specific public HTTP or HTTPS URL using Anakin.io.",
-    "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
-}]
+UTILITY_TOOL_DEFINITIONS = TOOL_DEFINITIONS
+
+WEB_TOOL_DEFINITIONS = [
+    {
+        "type": "function", "name": "search_live",
+        "description": (
+            "Call this for anything current or not in the machine manifest: specs, part numbers, "
+            "official guides, firmware, prices, error codes. Returns top web results with source URLs. "
+            "Triggers: 'look up', 'search', 'find the official', 'what does the manual say', "
+            "'what size', 'which version', 'is there a guide'. Say 'Let me look that up' while waiting."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "A focused web search query, including the machine name"}},
+            "required": ["query"]},
+    },
+    {
+        "type": "function", "name": "scrape_live",
+        "description": (
+            "Call this to read one specific web page, usually a URL returned by search_live, "
+            "when the snippet isn't enough to answer. Triggers: 'open that', 'read the guide', "
+            "'what does that page say'."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string", "description": "A full http(s) URL"}},
+            "required": ["url"]},
+    },
+]
+
+
+def web_tools_enabled() -> bool:
+    return bool(os.environ.get("ANAKIN_API_KEY", "").strip())
+
+
+def tool_definitions(sight=None) -> list[dict]:
+    """Tools to register for this session: sight tools only with an adapter, web tools only with a key."""
+    tools = list(UTILITY_TOOL_DEFINITIONS)
+    if getattr(sight, "name", "") == "model":
+        # AssemblyAI recommends <=10 tools per phase; Field mode keeps only calculate from the utilities.
+        tools = [t for t in tools if t["name"] == "calculate"]
+    if sight is not None:
+        tools += SIGHT_TOOL_DEFINITIONS
+    if web_tools_enabled():
+        tools += WEB_TOOL_DEFINITIONS
+    return tools
+
+
+TOOL_DEFINITIONS = UTILITY_TOOL_DEFINITIONS + SIGHT_TOOL_DEFINITIONS + WEB_TOOL_DEFINITIONS
 
 
 _SAFE_MATH = {
@@ -113,14 +151,15 @@ def execute_tool(name: str, arguments: str, sight=None) -> str:
     except json.JSONDecodeError:
         return f"Error: invalid arguments JSON: {arguments}"
 
-    if name in {"locate", "point", "expand", "describe", "walk_through"}:
+    if name in SIGHT_TOOLS:
         if sight is None:
             return "No visual adapter is active. Configure NETRA_SIGHT=model or screen."
         return sight.act(name, args)
+    hub = getattr(sight, "renderer", None)
     if name == "search_live":
-        return _search_live(args.get("query", ""))
+        return _search_live(args.get("query", ""), hub)
     if name == "scrape_live":
-        return _scrape_live(args.get("url", ""))
+        return _scrape_live(args.get("url", ""), hub)
 
     if name == "calculate":
         return _calculate(args.get("expression", ""))
@@ -195,7 +234,7 @@ def _define_word(word: str) -> str:
         return f"Error looking up '{word}': {e}"
 
 
-def _search_live(query: str) -> str:
+def _search_live(query: str, hub=None) -> str:
     """Search Anakin.io's synchronous web search endpoint."""
     query = str(query).strip()
     api_key = os.environ.get("ANAKIN_API_KEY", "").strip()
@@ -207,7 +246,7 @@ def _search_live(query: str) -> str:
         response = httpx.post(
             "https://api.anakin.io/v1/search",
             headers={"X-API-Key": api_key},
-            json={"prompt": query, "limit": 5},
+            json={"prompt": query, "limit": 3},
             timeout=20,
         )
         response.raise_for_status()
@@ -215,12 +254,16 @@ def _search_live(query: str) -> str:
         results = payload.get("results", [])
         if not results:
             return "No live search results were found."
-        return json.dumps(results[:5], ensure_ascii=False)
+        trimmed = [{"title": r.get("title", ""), "url": r.get("url", ""),
+                    "snippet": str(r.get("snippet", ""))[:400]} for r in results[:3]]
+        if hub:
+            hub.broadcast({"type": "sources", "query": query, "results": trimmed})
+        return json.dumps({"query": query, "results": trimmed}, ensure_ascii=False)
     except (httpx.HTTPError, ValueError) as exc:
         return f"Live search failed: {exc}"
 
 
-def _scrape_live(url: str) -> str:
+def _scrape_live(url: str, hub=None) -> str:
     """Fetch a single page through Anakin.io's inline URL scraper."""
     from urllib.parse import urlparse
 
@@ -235,7 +278,7 @@ def _scrape_live(url: str) -> str:
         response = httpx.post(
             "https://api.anakin.io/v1/url-scraper/scrape",
             headers={"X-API-Key": api_key},
-            json={"url": url, "formats": ["markdown"]},
+            json={"url": url},
             timeout=httpx.Timeout(90, connect=10),
         )
         response.raise_for_status()
@@ -267,6 +310,12 @@ def _scrape_live(url: str) -> str:
         content = payload.get("markdown") or payload.get("content") or ""
         if not content:
             return "Anakin.io completed the scrape but returned no markdown content."
-        return json.dumps({"url": url, "markdown": str(content)[:12000]}, ensure_ascii=False)
+        text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", str(content))
+        text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if hub:
+            hub.broadcast({"type": "sources", "query": "page", "results": [
+                {"title": payload.get("title") or url, "url": url, "snippet": text[:200]}]})
+        return json.dumps({"url": url, "content": text[:4000]}, ensure_ascii=False)
     except (httpx.HTTPError, ValueError) as exc:
         return f"Live URL scrape failed: {exc}"
