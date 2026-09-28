@@ -69,7 +69,7 @@ pointer to what you ask about (it never clicks). Needs `pyautogui`, `pytesseract
 
 ```bash
 python tests/test_sight.py         # offline: resolution (incl. STT typos), procedures, speculation, wake parsing
-python tests/eval_agent.py -j 6    # live: 36 multi-turn scenarios against the real Voice Agent API session
+python tests/eval_agent.py -j 6    # live: 40 multi-turn scenarios (web ones need ANAKIN_API_KEY) against the real Voice Agent API session
 python tests/smoke_anakin.py       # live: one search + one scrape through Anakin.io
 python tests/rehearse_viewer.py    # mic-free scripted demo in the viewer (http://127.0.0.1:8765)
 ```
