@@ -1,6 +1,7 @@
 manifest:
   domain: physical_machine
   name: Prusa MK4 Extruder
+  aliases: [3D printer, printer, extruder, Prusa, MK4, print head]
   # No GLB shipped: the viewer builds a procedural model whose mesh names match the part ids below.
   # Point this at a .glb (node names = part ids) to use a real model instead.
   source: procedural:extruder

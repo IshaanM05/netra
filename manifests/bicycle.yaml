@@ -1,0 +1,125 @@
+manifest:
+  domain: physical_machine
+  name: Bicycle Drivetrain and Brakes
+  aliases: [bike, bicycle, road bike, mountain bike, cycle, drivetrain, gears]
+  # Built-in procedural model; mesh names match the part ids below.
+  source: procedural:bicycle
+  parts:
+    - id: tire
+      name: rear tire
+      aliases: [tyre, tire, rear tyre, tube, inner tube, wheel]
+      description: Rubber tire and inner tube. Punctures and low pressure cause flats and pinch flats.
+    - id: rim
+      name: rim
+      aliases: [wheel rim, braking surface]
+      description: Metal hoop the tire sits on; rim brakes squeeze its sides to slow the bike.
+    - id: cassette
+      name: cassette
+      aliases: [rear cogs, cogs, sprockets, rear gears, freewheel]
+      description: Stack of rear sprockets. Worn teeth make a new or stretched chain skip.
+    - id: chain
+      name: chain
+      aliases: [bike chain]
+      description: Transfers pedalling force to the rear wheel. Needs regular cleaning and lube; stretches with wear.
+    - id: rear_derailleur
+      name: rear derailleur
+      aliases: [derailleur, rear mech, mech, shifter mechanism]
+      description: Moves the chain across the cassette when you shift and keeps the chain tensioned.
+      safety: Keep fingers clear of the jockey wheels while pedalling the cranks by hand.
+    - id: jockey_wheels
+      name: jockey wheels
+      aliases: [pulley wheels, derailleur pulleys, guide pulley, tension pulley]
+      description: Two small pulleys in the derailleur cage that guide and tension the chain.
+    - id: barrel_adjuster
+      name: barrel adjuster
+      aliases: [cable adjuster, indexing adjuster]
+      description: Threaded knob where the shift cable enters the derailleur. Quarter turns fine-tune shifting.
+    - id: chainring
+      name: chainring
+      aliases: [front chainring, front gear, front sprocket, chain ring]
+      description: Large front sprocket bolted to the crank.
+      safety: Chainring teeth are sharp; keep trouser legs and fingers away while pedalling.
+    - id: crank_arm
+      name: crank arm
+      aliases: [crank, cranks, crankset]
+      description: Lever arm connecting the pedal to the chainring. A loose crank creaks or knocks each pedal stroke.
+    - id: pedal
+      name: pedal
+      aliases: [pedals]
+      description: Threaded into the crank arm. The left pedal has a reverse thread.
+    - id: brake_caliper
+      name: brake caliper
+      aliases: [brake, rim brake, caliper, brakes, rear brake]
+      description: Arms that squeeze the brake pads against the rim when you pull the lever.
+      safety: Test brakes at walking speed after any adjustment before riding.
+    - id: brake_pads
+      name: brake pads
+      aliases: [pads, brake shoes, brake blocks]
+      description: Rubber blocks that press on the rim. Worn or contaminated pads squeal and stop poorly.
+    - id: quick_release
+      name: quick release
+      aliases: [QR, quick release skewer, skewer, thru axle, axle, wheel lever]
+      description: Lever and skewer that clamp the wheel in the frame.
+      safety: Close the lever firmly so it leaves an imprint on your palm; an open quick release can let the wheel fall out.
+  vocab:
+    - term: ghost shifting
+      maps_to: barrel_adjuster
+    - term: skipping
+      maps_to: chain
+    - term: flat
+      maps_to: tire
+    - term: puncture
+      maps_to: tire
+    - term: squealing
+      maps_to: brake_pads
+    - term: squeaky brakes
+      maps_to: brake_pads
+    - term: chain drop
+      maps_to: chain
+  procedures:
+    - name: fix skipping gears
+      aliases: [skipping gears, ghost shifting, gears slipping, chain skipping, indexing, shifting problem, gears won't shift]
+      steps:
+        - text: Shift to the smallest rear cog, then pedal by hand and listen for where it hesitates or skips.
+          parts: [cassette, chain]
+        - text: If the chain is slow to climb to bigger cogs, turn the barrel adjuster a quarter turn anticlockwise.
+          parts: [barrel_adjuster]
+        - text: If it's slow to drop to smaller cogs, turn the barrel adjuster a quarter turn clockwise instead.
+          parts: [barrel_adjuster]
+        - text: Run through all the gears again. If it still skips under load, the chain or cassette is probably worn.
+          parts: [chain, cassette]
+    - name: put a dropped chain back on
+      aliases: [dropped chain, chain came off, chain fell off, chain off]
+      steps:
+        - text: Shift to the smallest rear cog and the smallest front chainring.
+          parts: [cassette, chainring]
+        - text: Push the rear derailleur cage forward to create slack in the chain.
+          parts: [rear_derailleur, jockey_wheels]
+        - text: Hook the chain onto the bottom teeth of the chainring.
+          parts: [chain, chainring]
+        - text: Lift the rear wheel and turn the crank slowly forward until the chain seats itself.
+          parts: [crank_arm, chain]
+    - name: fix a flat tire
+      aliases: [flat tire, flat tyre, puncture, fix a flat, change the tube, repair a puncture]
+      steps:
+        - text: Shift to the smallest rear cog, open the brake if needed, and open the quick release to remove the wheel.
+          parts: [quick_release, brake_caliper]
+        - text: Let out any remaining air and use tire levers to unhook one side of the tire from the rim.
+          parts: [tire, rim]
+        - text: Pull out the tube and run your fingers carefully around the inside of the tire to find what caused the puncture.
+          parts: [tire]
+        - text: Put in a slightly inflated new tube, seat the tire back on the rim, and inflate to the pressure on the sidewall.
+          parts: [tire, rim]
+        - text: Refit the wheel, close the quick release firmly, and check the brake before riding.
+          parts: [quick_release, brake_caliper]
+    - name: fix squeaky brakes
+      aliases: [squeaky brakes, squealing brakes, brakes squeal, weak brakes, brakes not stopping]
+      steps:
+        - text: Look at the brake pads. If the grooves are worn away, they need replacing.
+          parts: [brake_pads]
+        - text: Clean the rim braking surface with rubbing alcohol and a clean rag.
+          parts: [rim]
+        - text: Lightly sand the pad surfaces to remove glazing.
+          parts: [brake_pads]
+        - text: Toe the pads in so the front edge touches the rim first, then retighten the pad bolts.
+          parts: [brake_pads, brake_caliper]

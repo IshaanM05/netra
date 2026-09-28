@@ -310,6 +310,27 @@ class AgentClient:
         except websockets.ConnectionClosed:
             pass
 
+    async def refresh_session(self, room_summary: str = ""):
+        """After a machine switch: new prompt, keyterms and transcription prompt (tools unchanged)."""
+        if not self._ws or not self._connected:
+            return
+        session = build_session(self._sight, room_summary)
+        for immutable in ("greeting", "output"):
+            session.pop(immutable, None)
+        try:
+            await self._send({"type": "session.update", "session": session})
+        except websockets.ConnectionClosed:
+            pass
+
+    async def announce(self, instructions: str):
+        """Make the agent speak now (e.g. a background job finished)."""
+        if not self._ws or not self._connected:
+            return
+        try:
+            await self._send({"type": "reply.create", "instructions": instructions})
+        except websockets.ConnectionClosed:
+            pass
+
     async def update_context(self, room_summary: str):
         if not self._ws or not self._connected:
             return

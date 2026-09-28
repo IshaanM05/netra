@@ -72,6 +72,8 @@ class Manifest:
     procedures: list[dict[str, Any]] = field(default_factory=list)
     base_dir: Path | None = None
     keyterms: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)   # other names for the machine itself
+    path: Path | None = None
 
     @classmethod
     def load(cls, filename: str | Path) -> "Manifest":
@@ -104,7 +106,9 @@ class Manifest:
         if domain == "physical_machine" and not parts:
             raise ValueError("physical_machine manifests require at least one part.")
         keyterms = [str(t) for t in data.get("keyterms", []) or []]
-        return cls(domain, name.strip(), source, parts, vocab, procedures, path.parent, keyterms)
+        aliases = [str(a) for a in data.get("aliases", []) or []]
+        return cls(domain, name.strip(), source, parts, vocab, procedures, path.parent, keyterms,
+                   aliases, path)
 
     @property
     def model_path(self) -> Path | None:
@@ -121,6 +125,10 @@ class Manifest:
                            "source": self.source,
                            "parts": self.parts, "vocab": self.vocab,
                            "procedures": self.procedures}, ensure_ascii=False)
+
+    def summary(self) -> dict[str, Any]:
+        return {"machine": self.name, "parts": [p.get("name") for p in self.parts],
+                "procedures": [p.get("name") for p in self.procedures]}
 
     def spoken_context(self) -> str:
         """Compact manifest summary for the system prompt."""
@@ -141,6 +149,46 @@ def _step_parts(step: Any) -> list[str]:
     return [str(p) for p in step.get("parts", [])] if isinstance(step, dict) else []
 
 
+class MachineLibrary:
+    """All physical-machine manifests in a directory tree (including learned ones)."""
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+        self.machines: list[Manifest] = []
+        self.reload()
+
+    def reload(self):
+        found = []
+        for path in sorted(self.root.rglob("*.yaml")):
+            try:
+                manifest = Manifest.load(path)
+            except ValueError:
+                continue
+            if manifest.domain == "physical_machine":
+                found.append(manifest)
+        self.machines = found
+
+    def names(self) -> list[str]:
+        return [m.name for m in self.machines]
+
+    def add(self, manifest: Manifest):
+        self.machines = [m for m in self.machines if m.name.lower() != manifest.name.lower()] + [manifest]
+
+    def find(self, query: str) -> Manifest | None:
+        text = _normalize(query)
+        best: tuple[float, Manifest] | None = None
+        for manifest in self.machines:
+            for phrase in [manifest.name, *manifest.aliases]:
+                if _contains_phrase(text, phrase):
+                    score = 100 + len(phrase)
+                else:
+                    overlap = _tokens(phrase) & _tokens(query)
+                    score = 10 * len(overlap) / max(1, len(_tokens(phrase)))
+                if score >= 5 and (not best or score > best[0]):
+                    best = (score, manifest)
+        return best[1] if best else None
+
+
 class Sight(Protocol):
     name: str
     def act(self, verb: str, arguments: dict[str, Any]) -> str: ...
@@ -155,14 +203,62 @@ class ModelSight:
 
     def _is_whole(self, query: str) -> bool:
         words = set(re.findall(r"[a-z]+", query.lower()))
-        return not words or words <= self._WHOLE_WORDS | {self.manifest.name.lower()} | set(
-            re.findall(r"[a-z]+", self.manifest.name.lower()))
+        own = set(re.findall(r"[a-z]+", " ".join([self.manifest.name, *self.manifest.aliases]).lower()))
+        return not words or words <= self._WHOLE_WORDS | own
 
-    def __init__(self, manifest: Manifest, renderer=None):
+    def __init__(self, manifest: Manifest, renderer=None, library: MachineLibrary | None = None, learner=None):
         self.manifest = manifest
         self.renderer = renderer
+        self.library = library
+        self.learner = learner          # optional: builds a manifest for an unknown machine from the web
+        self.on_switch = None           # callback(manifest) so the engine can refresh the agent session
         self._current_procedure: dict[str, Any] | None = None
         self._current_step = 0
+
+    def set_manifest(self, manifest: Manifest):
+        """Switch the active machine: viewer rebuilds the model, procedure state resets."""
+        self.manifest = manifest
+        self._current_procedure = None
+        self._current_step = 0
+        if self.renderer and hasattr(self.renderer, "set_manifest"):
+            self.renderer.set_manifest(manifest, self.library.names() if self.library else [])
+        if self.on_switch:
+            self.on_switch(manifest)
+
+    def _follow_up(self, request: str, commit: bool) -> dict[str, Any] | None:
+        """Handle the rest of 'switch to my bike, I got a flat' against the newly loaded machine."""
+        if not request:
+            return None
+        procedure = self.find_procedure(request) if re.search(
+            r"\b(fix|how|help|won't|isn't|keeps|problem|issue|error|broken|flat|clog|skip|squeak|replace|walk)", request.lower()) else None
+        if procedure is not None:
+            return {"walk_through": json.loads(self._walk_through({"procedure": procedure.get("name")}, "", commit))}
+        part = self.resolve(request)
+        if part is not None:
+            return {"locate": json.loads(self.act("locate", {"query": request}, commit))}
+        return None
+
+    def _load_machine(self, query: str, commit: bool, request: str = "") -> str:
+        if not query:
+            return json.dumps({"current": self.manifest.name,
+                               "library": self.library.names() if self.library else [self.manifest.name]})
+        found = self.library.find(query) if self.library else None
+        if found is None and self.manifest and _contains_phrase(_normalize(query), self.manifest.name):
+            found = self.manifest
+        if found is not None:
+            if commit and found is not self.manifest:
+                self.set_manifest(found)
+            result = {"loaded": found.name, **found.summary(), "shown_in_3d_view": self._viewer_live}
+            follow = self._follow_up(request, commit) if found is self.manifest else None
+            if follow:
+                result["already_done_for_their_request"] = follow
+            return json.dumps(result, ensure_ascii=False)
+        if not commit:
+            return json.dumps({"not_in_library": query})
+        if self.learner is None:
+            names = ", ".join(self.library.names()) if self.library else self.manifest.name
+            return f"'{query}' is not in the machine library ({names}) and learning new machines is unavailable."
+        return self.learner.start(query)
 
     # ---------- resolution ----------
 
@@ -265,6 +361,10 @@ class ModelSight:
 
         if verb == "walk_through":
             return self._walk_through(arguments, query, commit)
+
+        if verb == "load_machine":
+            return self._load_machine(str(arguments.get("machine") or query).strip(), commit,
+                                      str(arguments.get("also_asked") or "").strip())
 
         if verb == "reset_view":
             if not commit:
@@ -462,7 +562,7 @@ class ScreenSight:
         return f"Unsupported screen action: {verb}."
 
 
-SIGHT_TOOLS = {"locate", "point", "expand", "describe", "walk_through", "reset_view"}
+SIGHT_TOOLS = {"locate", "point", "expand", "describe", "walk_through", "reset_view", "load_machine"}
 
 TOOL_DEFINITIONS = [
     {
@@ -522,6 +622,19 @@ TOOL_DEFINITIONS = [
             "procedure": {"type": "string", "description": "The problem or procedure in the user's words; for 'next' reuse the current procedure name"},
             "step": {"type": "integer", "minimum": 1, "description": "Specific step number; omit for the next step"}},
             "required": ["procedure"]},
+    },
+    {
+        "type": "function", "name": "load_machine",
+        "description": (
+            "Call this when the user wants to work on a different machine or asks what machines you know. "
+            "Switches the 3D view and your knowledge to that machine; if it isn't in the library yet, "
+            "starts learning it from the web in the background (takes about a minute; you'll be told "
+            "when it's ready). Triggers: 'switch to the X', 'let's look at my X', 'load the X', "
+            "'I'm working on a X now', 'learn the X', 'what machines do you know'. Leave machine empty to list."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "machine": {"type": "string", "description": "Machine name as the user said it, e.g. 'bike' or 'Breville Barista Express'"},
+            "also_asked": {"type": "string", "description": "Anything else the user asked in the same sentence, verbatim, e.g. 'where's the nozzle?' or 'I got a flat'. It is handled on the new machine and the result is returned."}}},
     },
     {
         "type": "function", "name": "reset_view",

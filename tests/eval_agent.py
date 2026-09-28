@@ -30,11 +30,13 @@ sys.path.insert(0, str(ROOT))
 
 from src.sidebar import config  # noqa: E402
 from src.sidebar.agent import build_session  # noqa: E402
-from src.sidebar.sight import Manifest, ModelSight  # noqa: E402
+from src.sidebar.learn import MachineLearner  # noqa: E402
+from src.sidebar.sight import MachineLibrary, Manifest, ModelSight  # noqa: E402
 from src.sidebar.tools import execute_tool, web_tools_enabled  # noqa: E402
 from src.sidebar.viewer import RecordingHub  # noqa: E402
 
 MANIFEST = ROOT / "manifests" / "sample-machine.yaml"
+LEARNED_DIR = Path("/tmp/netra-eval-learned")  # keep test-learned packs out of the real library
 
 
 # ---------------------------------------------------------------- expectations
@@ -48,6 +50,10 @@ class Expect:
     step: int | None = None          # procedure step the viewer must show after this turn
     any_of: tuple[str, ...] = ()     # alternative acceptable tools
     say: tuple[str, ...] = ()        # substrings (lowercase) the spoken reply must contain (any)
+    machine: str | None = None       # active machine name (substring) after this turn
+    pause: float = 0.0               # seconds to wait before sending this turn (background jobs)
+    also: str | None = None          # a second tool that must also be called in the same turn
+    highlights: str | None = None    # part id the viewer must have highlighted during this turn
 
 
 @dataclass
@@ -140,8 +146,28 @@ SCENARIOS: list[Scenario] = [
     S("unknown part", ("Where's the Z axis motor?", Expect("locate", any_of=("describe",)))),
 ]
 
+SCENARIOS += [
+    # ---- machine library: switching and working on the second machine
+    S("switch to bike and locate",
+      ("Let's switch to my bike.", Expect("load_machine", machine="Bicycle")),
+      ("Where's the rear derailleur?", Expect("locate", part="rear_derailleur", machine="Bicycle"))),
+    S("bike procedure",
+      ("Switch to the bicycle.", Expect("load_machine", machine="Bicycle")),
+      ("My chain keeps skipping when I pedal hard.", Expect("walk_through", procedure="skipping", step=1)),
+      ("Okay, next.", Expect("walk_through", procedure="skipping", step=2))),
+    S("bike flat then back to printer",
+      ("I'm working on my bike now. I got a flat.", Expect("load_machine", procedure="flat", step=1, machine="Bicycle")),
+      ("Done, next step.", Expect("walk_through", procedure="flat", step=2)),
+      ("Actually, switch back to the 3D printer. Where's the nozzle?",
+       Expect("load_machine", machine="Prusa", highlights="nozzle"))),
+    S("list machines", ("What machines do you know about?", Expect("load_machine"))),
+]
+
 # Live web grounding (Anakin). Only run when ANAKIN_API_KEY is set.
 WEB_SCENARIOS: list[Scenario] = [
+    S("learn new machine",
+      ("I'm working on a Breville Barista Express espresso machine now.", Expect("load_machine")),
+      ("Is it ready? Where's the steam wand?", Expect("locate", machine="Barista", pause=35))),
     S("web official guide", ("Look up the official Prusa guide for a clogged nozzle on the MK4.",
                              Expect("search_live"))),
     S("web spec not in manifest", ("What nozzle diameter does the MK4 ship with by default?",
@@ -192,6 +218,8 @@ class Session:
         self.sight, self.hub, self.debug = sight, hub, debug
         self.ws = None
         self.turn_state = ""
+        self.needs_refresh = False
+        sight.on_switch = lambda manifest: setattr(self, "needs_refresh", True)  # mirrors the engine
 
     async def __aenter__(self):
         headers = {"Authorization": f"Bearer {config.API_KEY}"}
@@ -220,6 +248,11 @@ class Session:
 
     async def turn(self, text: str, timeout: float = 30) -> TurnResult:
         result = TurnResult(user=text)
+        if self.needs_refresh:  # what NetraEngine._on_machine_switch does
+            self.needs_refresh = False
+            session = build_session(self.sight)
+            session.pop("greeting"); session.pop("output")
+            await self.ws.send(json.dumps({"type": "session.update", "session": session}))
         start_events = len(self.hub.events)
         started = time.monotonic()
         for payload in inject_payloads(text, INJECT):
@@ -304,17 +337,29 @@ def check(sight: ModelSight, expect: Expect, res: TurnResult) -> tuple[bool, str
             return False, f"expected step {expect.step}, viewer shows step {last.get('step')} ({calls})"
     if expect.say and not any(s in res.reply.lower() for s in expect.say):
         return False, f"reply missing {expect.say}"
+    if expect.highlights and not any(e.get("type") == "highlight" and e.get("part_id") == expect.highlights
+                                     and e.get("mode") == "solid" for e in res.events):
+        return False, f"viewer never highlighted {expect.highlights}"
+    if expect.also and expect.also not in names:
+        return False, f"expected {expect.tool} and then {expect.also}, got {names}"
+    if expect.machine and expect.machine.lower() not in sight.manifest.name.lower():
+        return False, f"active machine is {sight.manifest.name}, expected {expect.machine}"
     return True, ""
 
 
 async def run_scenario(scn: Scenario, sem: asyncio.Semaphore, debug: bool) -> list[TurnResult]:
     async with sem:
         hub = RecordingHub()
-        sight = ModelSight(Manifest.load(MANIFEST), renderer=hub)
+        library = MachineLibrary(ROOT / "manifests")
+        sight = ModelSight(library.find("Prusa MK4 Extruder"), renderer=hub, library=library)
+        if web_tools_enabled():
+            sight.learner = MachineLearner(library, LEARNED_DIR, hub, on_ready=sight.set_manifest)
         results = []
         try:
             async with Session(sight, hub, debug) as session:
                 for text, expect in scn.turns:
+                    if expect.pause:
+                        await asyncio.sleep(expect.pause)
                     res = await session.turn(text)
                     res.ok, res.why = check(sight, expect, res) if not res.why else (False, res.why)
                     results.append(res)

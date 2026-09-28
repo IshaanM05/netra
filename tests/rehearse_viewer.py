@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.sidebar.sight import Manifest, ModelSight  # noqa: E402
+from src.sidebar.sight import MachineLibrary, ModelSight  # noqa: E402
 from src.sidebar.speculation import SpeculativeExecutor  # noqa: E402
 from src.sidebar.viewer import ViewerHub  # noqa: E402
 
@@ -73,6 +73,16 @@ async def script(hub, sight, spec):
          "url": "https://help.prusa3d.com/article/clogged-nozzle-hotend-mk4", "snippet": ""}]})
     await partials(hub, spec, "Thanks. Reset the view.")
     await tool(hub, spec, sight, "reset_view", {})
+    await asyncio.sleep(2)
+
+    await partials(hub, spec, "Now switch to my bike, the chain keeps skipping.")
+    await tool(hub, spec, sight, "load_machine", {"machine": "bike", "also_asked": "the chain keeps skipping"})
+    await say(hub, "agent", "Bike's up. First, shift to the smallest rear cog and pedal by hand — listen for where it skips.", 5)
+    await partials(hub, spec, "Okay, next.")
+    await tool(hub, spec, sight, "walk_through", {"procedure": "fix skipping gears"})
+    await say(hub, "agent", "If it's slow to climb to bigger cogs, turn the barrel adjuster a quarter turn anticlockwise.", 5)
+    await partials(hub, spec, "Back to the printer.")
+    await tool(hub, spec, sight, "load_machine", {"machine": "3D printer"})
     await asyncio.sleep(3)
 
 
@@ -81,10 +91,12 @@ async def main():
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--wait", type=float, default=6, help="seconds to wait for the browser first")
     args = parser.parse_args()
-    manifest = Manifest.load(ROOT / "manifests" / "sample-machine.yaml")
+    library = MachineLibrary(ROOT / "manifests")
+    manifest = library.find("Prusa MK4 Extruder")
     hub = ViewerHub()
-    await hub.start(manifest)
-    sight = ModelSight(manifest, renderer=hub)
+    await hub.start(manifest, library.names())
+    sight = ModelSight(manifest, renderer=hub, library=library)
+    hub.on_message = lambda m: sight.act("load_machine", {"machine": m.get("machine", "")})
     spec = SpeculativeExecutor(sight, hub)
     print(f"viewer: {hub.url}")
     await asyncio.sleep(args.wait)

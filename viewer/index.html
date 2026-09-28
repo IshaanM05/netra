@@ -64,6 +64,13 @@
   aside h2 { margin: 0 0 10px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
   .machine { font-weight: 600; font-size: 15px; }
   .machine small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+  .picker { display: none; margin-top: 10px; width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: 13px Inter; }
+  .learning { display: none; margin-top: 10px; padding: 9px 11px; border-radius: 8px; background: #2f230c;
+    border: 1px dashed var(--ghost); font-size: 12px; color: var(--ghost); }
+  .learning.show { display: block; } .learning b { display: block; font-size: 13px; }
+  .learning.ready { background: #0e2a31; border-color: var(--solid); color: var(--solid); }
+  .learning.failed { background: #2a1414; border-color: var(--bad); color: var(--bad); }
   .step { display: none; }
   .step.show { display: block; }
   .step .proc { font-weight: 600; text-transform: capitalize; }
@@ -125,6 +132,8 @@
     <section>
       <h2>Machine</h2>
       <div class="machine" id="machine">—<small>waiting for manifest</small></div>
+      <select id="picker" class="picker" aria-label="Machine"></select>
+      <div id="learning" class="learning"></div>
     </section>
     <section class="step" id="step">
       <h2>Procedure <span class="count" id="stepCount"></span></h2>
@@ -145,6 +154,8 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
+const params = new URLSearchParams(location.search);
+
 // ------------------------------------------------------------------ scene
 const host = document.getElementById("canvas");
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -158,6 +169,7 @@ scene.background = new THREE.Color(0x0b0d10);
 scene.fog = new THREE.Fog(0x0b0d10, 30, 60);
 const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
 const HOME = { pos: new THREE.Vector3(9.5, 5.5, 12), target: new THREE.Vector3(0, 1.6, 0) };
+const VIEW_DIR = new THREE.Vector3(9.5, 3.9, 12).normalize();
 camera.position.copy(HOME.pos);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.copy(HOME.target);
@@ -196,7 +208,7 @@ function mesh(geo, mat, x = 0, y = 0, z = 0, rot) {
 }
 const root = new THREE.Group(); scene.add(root);
 
-function buildProcedural() {
+function buildExtruder() {
 
   part("ptfe_tube", "PTFE tube", g => {
     g.add(mesh(new THREE.CylinderGeometry(0.16, 0.16, 2.4, 24), M(0xf4f6f8, { r: 0.2, t: 0.75 }), 0, 4.9, 0));
@@ -281,6 +293,159 @@ async function buildFromGLB(url) {
   }
 }
 
+function buildBicycle() {
+  const hub = new THREE.Vector3(2.2, 1.2, 0), bb = new THREE.Vector3(-2.3, 1.0, 0), seat = new THREE.Vector3(-0.7, 4.4, 0);
+  const tubeBetween = (a, b, r, mat) => {
+    const d = b.clone().sub(a), m = mesh(new THREE.CylinderGeometry(r, r, d.length(), 16), mat);
+    m.position.copy(a).add(b).multiplyScalar(0.5);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize()); return m;
+  };
+  // frame (not a part): chainstay, seatstay, seat tube, in brand orange
+  const frameMat = M(0xfa6831, { r: 0.45, m: 0.4 });
+  for (const z of [-0.32, 0.32]) {
+    root.add(tubeBetween(hub.clone().setZ(z), bb.clone().setZ(z * 0.6), 0.07, frameMat));
+    root.add(tubeBetween(hub.clone().setZ(z), seat.clone().setZ(z * 0.3), 0.06, frameMat));
+  }
+  root.add(tubeBetween(bb, seat, 0.11, frameMat));
+  root.add(tubeBetween(seat, seat.clone().add(new THREE.Vector3(-0.45, 1.1, 0)), 0.08, M(0x2a2f36)));
+  root.add(mesh(new THREE.BoxGeometry(1.3, 0.2, 0.45), M(0x1c1f24), -1.35, 5.6, 0));
+
+  part("tire", "rear tire", g => {
+    g.add(mesh(new THREE.TorusGeometry(2.62, 0.17, 20, 96), M(0x1b1d21, { r: 0.9, m: 0 }), hub.x, hub.y, 0));
+  });
+  part("rim", "rim", g => {
+    g.add(mesh(new THREE.TorusGeometry(2.42, 0.07, 12, 96), M(0xc9cdd3, { m: 0.9, r: 0.25 }), hub.x, hub.y, 0));
+    g.add(mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.7, 20), M(0x9aa1ab, { m: 0.9 }), hub.x, hub.y, 0, [Math.PI / 2, 0, 0]));
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2, rimPt = hub.clone().add(new THREE.Vector3(Math.cos(a) * 2.38, Math.sin(a) * 2.38, 0));
+      g.add(tubeBetween(hub.clone().setZ(i % 2 ? 0.28 : -0.28), rimPt, 0.012, M(0xb9bec6, { m: 0.9 })));
+    }
+  });
+  part("cassette", "cassette", g => {
+    for (let i = 0; i < 8; i++) {
+      const r = 0.95 - i * 0.07;
+      g.add(mesh(new THREE.CylinderGeometry(r, r, 0.035, 32), M(0xb9bec6, { m: 0.9, r: 0.3 }), hub.x, hub.y, 0.36 + i * 0.055, [Math.PI / 2, 0, 0]));
+    }
+  });
+  part("chainring", "chainring", g => {
+    const shape = new THREE.Shape(); const teeth = 44;
+    for (let i = 0; i <= teeth * 2; i++) {
+      const a = (i / (teeth * 2)) * Math.PI * 2, r = i % 2 ? 1.12 : 1.2;
+      i ? shape.lineTo(Math.cos(a) * r, Math.sin(a) * r) : shape.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    const hole = new THREE.Path(); hole.absarc(0, 0, 0.75, 0, Math.PI * 2, true); shape.holes.push(hole);
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.06, bevelEnabled: false }); geo.center();
+    g.add(mesh(geo, M(0x2a2f36, { m: 0.8, r: 0.35 }), bb.x, bb.y, 0.5));
+    for (let i = 0; i < 4; i++) {
+      const a = i * Math.PI / 2 + 0.4;
+      g.add(tubeBetween(bb.clone().setZ(0.5), bb.clone().add(new THREE.Vector3(Math.cos(a) * 0.8, Math.sin(a) * 0.8, 0.5)), 0.07, M(0x2a2f36, { m: 0.8 })));
+    }
+  });
+  part("chain", "chain", g => {
+    const z = 0.5, pts = [];
+    const arc = (c, r, a0, a1, n) => { for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; pts.push(new THREE.Vector3(c.x + Math.cos(a) * r, c.y + Math.sin(a) * r, z)); } };
+    arc(hub, 0.72, -Math.PI / 2 + 0.3, Math.PI / 2, 10);                 // over the top of the cog
+    arc(bb, 1.18, Math.PI / 2, 3 * Math.PI / 2, 16);                      // around the front of the chainring
+    pts.push(new THREE.Vector3(2.05, -0.55, z), new THREE.Vector3(2.35, 0.1, z)); // through the jockey wheels
+    const curve = new THREE.CatmullRomCurve3(pts, true, "catmullrom", 0.2);
+    g.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 240, 0.045, 8, true), M(0x6b7280, { m: 0.9, r: 0.35 })));
+  });
+  part("rear_derailleur", "rear derailleur", g => {
+    g.add(mesh(new THREE.BoxGeometry(0.3, 0.8, 0.25), M(0x2a2f36, { m: 0.6 }), 2.55, 0.55, 0.7, [0, 0, 0.35]));
+    g.add(mesh(new THREE.BoxGeometry(0.12, 0.95, 0.04), M(0x9aa1ab, { m: 0.8 }), 2.2, -0.22, 0.62, [0, 0, 0.35]));
+  });
+  part("jockey_wheels", "jockey wheels", g => {
+    for (const [x, y] of [[2.35, 0.1], [2.05, -0.55]]) g.add(mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.08, 20), M(0x111317), x, y, 0.55, [Math.PI / 2, 0, 0]));
+  });
+  part("barrel_adjuster", "barrel adjuster", g => {
+    g.add(mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.3, 16), M(0xd6453d, { m: 0.6 }), 2.82, 0.95, 0.78, [0, 0, 0.35]));
+    g.add(tubeBetween(new THREE.Vector3(2.9, 1.1, 0.78), new THREE.Vector3(1.6, 2.4, 0.4), 0.025, M(0x1c1f24)));
+  });
+  part("crank_arm", "crank arm", g => {
+    g.add(tubeBetween(bb.clone().setZ(0.62), bb.clone().add(new THREE.Vector3(0.55, -1.6, 0.62)), 0.1, M(0x2a2f36, { m: 0.7 })));
+  });
+  part("pedal", "pedal", g => {
+    g.add(mesh(new THREE.BoxGeometry(0.5, 0.12, 0.7), M(0x1c1f24), bb.x + 0.55, bb.y - 1.6, 1.0));
+  });
+  const dir = seat.clone().sub(hub).normalize(), angle = Math.atan2(dir.y, dir.x) - Math.PI / 2;
+  part("brake_caliper", "brake caliper", g => {
+    const c = hub.clone().addScaledVector(dir, 2.95);
+    g.add(mesh(new THREE.BoxGeometry(0.5, 0.18, 0.7), M(0x9aa1ab, { m: 0.85 }), c.x, c.y, 0, [0, 0, angle]));
+    for (const z of [-0.3, 0.3]) {
+      const a = hub.clone().addScaledVector(dir, 2.9).setZ(z), b = hub.clone().addScaledVector(dir, 2.35).setZ(z);
+      g.add(tubeBetween(a, b, 0.05, M(0x9aa1ab, { m: 0.85 })));
+    }
+  });
+  part("brake_pads", "brake pads", g => {
+    const c = hub.clone().addScaledVector(dir, 2.42);
+    for (const z of [-0.14, 0.14]) g.add(mesh(new THREE.BoxGeometry(0.35, 0.12, 0.07), M(0x111317, { r: 0.9 }), c.x, c.y, z, [0, 0, angle + Math.PI / 2]));
+  });
+  part("quick_release", "quick release", g => {
+    g.add(mesh(new THREE.CylinderGeometry(0.035, 0.035, 1.1, 8), M(0xdddddd, { m: 0.9 }), hub.x, hub.y, -0.1, [Math.PI / 2, 0, 0]));
+    g.add(mesh(new THREE.BoxGeometry(0.18, 0.75, 0.08), M(0x2a2f36), hub.x + 0.05, hub.y - 0.3, -0.55, [0, 0, 0.3]));
+  });
+}
+
+function labelTexture(text) {
+  const c = document.createElement("canvas"); c.width = 512; c.height = 160;
+  const x = c.getContext("2d"); x.fillStyle = "#12151a"; x.fillRect(0, 0, 512, 160);
+  x.fillStyle = "#e7eaee"; x.font = "600 44px Inter, sans-serif"; x.textAlign = "center"; x.textBaseline = "middle";
+  const words = text.split(" "); let line = "", lines = [];
+  for (const w of words) { if ((line + " " + w).trim().length > 18) { lines.push(line.trim()); line = w; } else line += " " + w; }
+  lines.push(line.trim()); lines = lines.slice(0, 2);
+  lines.forEach((l, i) => x.fillText(l, 256, 80 + (i - (lines.length - 1) / 2) * 50));
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+
+// Learned machines have no 3D model: parts become labelled tiles on a ring around the machine name.
+function buildSchematic(ev) {
+  root.add(mesh(new THREE.CylinderGeometry(1.1, 1.1, 0.5, 48), M(0x22d3ee, { m: 0.2, r: 0.6, t: 0.25 }), 0, 1.6, 0));
+  const title = mesh(new THREE.PlaneGeometry(3.2, 1.0), new THREE.MeshBasicMaterial({ map: labelTexture(ev.name), transparent: true }), 0, 2.6, 0);
+  root.add(title);
+  const n = ev.parts.length, radius = Math.max(3.2, n * 0.42);
+  ev.parts.forEach((p, i) => {
+    const a = (i / n) * Math.PI * 2;
+    part(p.id, p.name, g => {
+      const x = Math.cos(a) * radius, z = Math.sin(a) * radius;
+      const tile = mesh(new THREE.BoxGeometry(1.9, 0.7, 0.12), [M(0x2a2f36), M(0x2a2f36), M(0x2a2f36), M(0x2a2f36),
+        new THREE.MeshStandardMaterial({ map: labelTexture(p.name), roughness: 0.6 }), M(0x2a2f36)], x, 1.6, z);
+      tile.lookAt(0, 1.6, 0); tile.rotateY(Math.PI);
+      g.add(tile);
+    });
+  });
+  // tiles use a material array: give each mesh a single base material for highlighting
+  Object.values(parts).forEach(g => g.traverse(o => { if (o.isMesh && Array.isArray(o.material)) { o.userData.baseMat = o.material[4]; } }));
+}
+
+function clearModel() {
+  for (const child of [...root.children]) root.remove(child);
+  for (const k of Object.keys(parts)) delete parts[k];
+  for (const k of Object.keys(labels)) delete labels[k];
+  state.solid.clear(); state.ghost.clear(); state.explode = state.explodeTarget = 0;
+  tagHost.innerHTML = ""; hideStep();
+}
+
+function fitCamera() {
+  const box = new THREE.Box3().setFromObject(root);
+  const c = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3()).length();
+  assemblyCenter.copy(c); HOME.target.copy(c);
+  HOME.pos.copy(c).addScaledVector(VIEW_DIR, Math.max(10, size * 1.35));
+  home();
+}
+
+async function buildModel(ev) {
+  if (ev.source === currentSource && Object.keys(parts).length) return;
+  currentSource = ev.source; clearModel();
+  const glb = params.get("model") || (/\.(glb|gltf)$/i.test(ev.source || "") ? "model.glb" : null);
+  try {
+    if (glb) await buildFromGLB(glb);
+    else if (ev.source === "procedural:extruder") buildExtruder();
+    else if (ev.source === "procedural:bicycle") buildBicycle();
+    else buildSchematic(ev);
+  } catch (err) { console.error(err); clearModel(); buildSchematic(ev); }
+  fitCamera();
+}
+
 // ------------------------------------------------------------------ visual state
 const state = { solid: new Set(), ghost: new Set(), explode: 0, explodeTarget: 0, focus: null };
 const SOLID = new THREE.Color(0x22d3ee), GHOST = new THREE.Color(0xf5a524), BLACK = new THREE.Color(0x000000);
@@ -290,6 +455,8 @@ function center(id) {
   const box = new THREE.Box3().setFromObject(parts[id]); return box.getCenter(new THREE.Vector3());
 }
 const assemblyCenter = new THREE.Vector3(0, 1.6, 0);
+let currentSource = null;
+const isSchematic = () => !/^procedural:(extruder|bicycle)$|\.(glb|gltf)$/i.test(currentSource || "");
 function applyMaterials(t) {
   const anyActive = state.solid.size || state.ghost.size;
   for (const [id, g] of Object.entries(parts)) {
@@ -385,7 +552,16 @@ const actions = {
     syncTags();
   },
   clear_ghost({ part_ids }) { (part_ids || [...state.ghost]).forEach(id => state.ghost.delete(id)); syncTags(); },
-  focus({ part_id }) { if (parts[part_id]) flyTo(center(part_id), 8 + state.explode * 4); },
+  focus({ part_id }) {
+    if (!parts[part_id]) return;
+    if (isSchematic()) {  // look at the tile face-on from outside the ring
+      const c = center(part_id), out = c.clone().sub(assemblyCenter).setY(0).normalize();
+      camTween = { t: 0, fromPos: camera.position.clone(), fromTarget: controls.target.clone(),
+        toTarget: c, toPos: c.clone().addScaledVector(out, 6).add(new THREE.Vector3(0, 1.5, 0)) };
+      controls.autoRotate = false; return;
+    }
+    flyTo(center(part_id), 8 + state.explode * 4);
+  },
   explode({ part_id }) {
     state.explodeTarget = 1;
     if (part_id && parts[part_id]) { state.solid = new Set([part_id]); syncTags(); flyTo(center(part_id), 12); }
@@ -394,7 +570,9 @@ const actions = {
   reset() { state.solid.clear(); state.ghost.clear(); state.explodeTarget = 0; syncTags(); home(); hideStep(); },
   step(e) {
     state.solid = new Set((e.part_ids || []).filter(id => parts[id])); state.ghost.clear(); syncTags();
-    if (state.solid.size) {
+    if (state.solid.size === 1 && isSchematic()) actions.focus({ part_id: [...state.solid][0] });
+    else if (state.solid.size && isSchematic()) home();
+    else if (state.solid.size) {
       const c = new THREE.Vector3(); state.solid.forEach(id => c.add(center(id))); c.divideScalar(state.solid.size);
       flyTo(c, 9 + state.explode * 4);
     }
@@ -426,10 +604,22 @@ function setStatus(s, err) { $("status").dataset.state = s; $("statusText").text
 
 function handle(e) {
   switch (e.type) {
-    case "manifest":
+    case "manifest": {
       manifestNames = Object.fromEntries(e.parts.map(p => [p.id, p.name]));
-      $("machine").innerHTML = `${e.name}<small>${e.parts.length} parts · live 3D model</small>`;
-      buildDemo(); break;
+      const kind = /^procedural:(extruder|bicycle)$|\.(glb|gltf)$/i.test(e.source || "") ? "live 3D model" : "schematic · learned from the web";
+      $("machine").innerHTML = `${escapeHtml(e.name)}<small>${e.parts.length} parts · ${kind}</small>`;
+      const pick = $("picker");
+      pick.innerHTML = (e.library || [e.name]).map(n => `<option ${n === e.name ? "selected" : ""}>${escapeHtml(n)}</option>`).join("");
+      pick.style.display = (e.library || []).length > 1 ? "block" : "none";
+      $("learning").classList.remove("show");
+      buildModel(e).then(buildDemo); break;
+    }
+    case "learning": {
+      const box = $("learning"); box.classList.add("show");
+      box.className = `learning show ${e.stage}`;
+      box.innerHTML = `<b>${e.stage === "failed" ? "Couldn't learn" : e.stage === "ready" ? "Learned" : "Learning"} ${escapeHtml(e.machine)}</b><span>${escapeHtml(e.detail || "")}</span>`;
+      break;
+    }
     case "status": setStatus(e.state, e.error); break;
     case "partial": if (e.text) caption("user", e.text); break;
     case "transcript": addMsg(e.who, e.text); caption(e.who, e.text); break;
@@ -488,8 +678,9 @@ renderer.domElement.addEventListener("click", ev => {
 
 // ------------------------------------------------------------------ connection
 let wsRetry = 500;
+let socket = null;
 function connect() {
-  const ws = new WebSocket(`ws://${location.hostname || "127.0.0.1"}:8766`);
+  const ws = socket = new WebSocket(`ws://${location.hostname || "127.0.0.1"}:8766`);
   ws.onopen = () => { wsRetry = 500; setStatus("listening"); };
   ws.onmessage = m => { try { handle(JSON.parse(m.data)); } catch (err) { console.error(err, m.data); } };
   ws.onclose = () => { setStatus("offline"); setTimeout(connect, wsRetry = Math.min(wsRetry * 2, 4000)); };
@@ -497,9 +688,9 @@ function connect() {
 
 window.netra = { handle }; // for scripted rehearsal from the console
 
-const params = new URLSearchParams(location.search);
-if (params.get("model")) await buildFromGLB(params.get("model")).catch(err => { console.error(err); buildProcedural(); });
-else buildProcedural();
+$("picker").addEventListener("change", ev => {
+  if (socket?.readyState === 1) socket.send(JSON.stringify({ type: "load_machine", machine: ev.target.value }));
+});
 applyMaterials(0);
 frame();
 connect();

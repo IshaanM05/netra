@@ -14,12 +14,13 @@ sys.path.insert(0, str(ROOT))
 os.environ["ANAKIN_API_KEY"] = ""  # keep speculation offline
 
 from src.sidebar.engine import NetraEngine  # noqa: E402
-from src.sidebar.sight import Manifest, ModelSight  # noqa: E402
+from src.sidebar.learn import normalize_draft  # noqa: E402
+from src.sidebar.sight import MachineLibrary, Manifest, ModelSight  # noqa: E402
 from src.sidebar.speculation import SpeculativeExecutor  # noqa: E402
 from src.sidebar.tools import tool_definitions  # noqa: E402
 from src.sidebar.viewer import RecordingHub  # noqa: E402
 
-MANIFEST = Manifest.load(ROOT / "manifests" / "sample-machine.yaml")
+MANIFEST = Manifest.load(ROOT / "manifests" / "sample-machine.yaml")  # the extruder
 
 
 def fresh():
@@ -135,6 +136,43 @@ def test_tool_budget():
     names = [t["name"] for t in tool_definitions(sight)]
     assert len(names) <= 10, names  # AssemblyAI guidance: <=10 tools per phase
     assert "locate" in names and "walk_through" in names and "get_time" not in names
+
+
+def test_library_and_switching():
+    library = MachineLibrary(ROOT / "manifests")
+    for query, expected in {"bike": "Bicycle", "my road bike": "Bicycle", "the 3D printer": "Prusa",
+                            "Prusa": "Prusa"}.items():
+        assert expected in library.find(query).name, query
+    assert library.find("Breville espresso machine") is None
+    hub = RecordingHub()
+    sight = ModelSight(library.find("printer"), renderer=hub, library=library)
+    switched = []
+    sight.on_switch = switched.append
+    result = json.loads(sight.act("load_machine", {"machine": "bike", "also_asked": "I got a flat"}))
+    assert result["loaded"].startswith("Bicycle") and switched and switched[0].name.startswith("Bicycle")
+    assert result["already_done_for_their_request"]["walk_through"]["procedure"] == "fix a flat tire"
+    assert any(e["type"] == "manifest" and e["name"].startswith("Bicycle") for e in hub.events)
+    assert sight.resolve("the pulley wheels")["id"] == "jockey_wheels"
+    back = json.loads(sight.act("load_machine", {"machine": "3D printer", "also_asked": "where's the nozzle?"}))
+    assert back["already_done_for_their_request"]["locate"]["part_id"] == "nozzle"
+    assert "learning new machines is unavailable" in sight.act("load_machine", {"machine": "espresso machine"})
+
+
+def test_normalize_learned_draft():
+    draft = {"name": "Barista Express", "parts": [
+        {"id": "Steam Wand", "name": "steam wand", "safety": "None"},
+        {"name": "steam wand", "description": "duplicate id"},
+        {"id": "portafilter", "name": "Portafilter", "safety": "Hot after brewing."}],
+        "procedures": [{"name": "purge", "steps": [{"text": "Open the wand", "parts": ["steam wand", "ghost"]},
+                                                     "Close it"]}],
+        "vocab": [{"term": "sputter", "maps_to": "steam_wand"}, {"term": "x", "maps_to": "nope"}]}
+    data = normalize_draft(draft, "fallback")["manifest"]
+    ids = [p["id"] for p in data["parts"]]
+    assert ids == ["steam_wand", "portafilter"]  # duplicate name dropped
+    assert "safety" not in data["parts"][0] and data["parts"][1]["safety"]
+    assert data["procedures"][0]["steps"][0]["parts"] == ["steam_wand"]
+    assert data["procedures"][0]["steps"][1] == {"text": "Close it", "parts": []}
+    assert data["vocab"] == [{"term": "sputter", "maps_to": "steam_wand"}]
 
 
 def test_wake_parsing():

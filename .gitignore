@@ -25,3 +25,6 @@ Thumbs.db
 *.wav
 *.pcm
 *.raw
+
+# Machines Netra learned at runtime
+manifests/learned/

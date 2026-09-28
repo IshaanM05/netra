@@ -20,8 +20,21 @@ VIEWER_DIR = Path(__file__).resolve().parents[2] / "viewer"
 
 
 class _QuietHandler(SimpleHTTPRequestHandler):
+    model_path: Path | None = None  # the active manifest's .glb, served at /model.glb
+
     def log_message(self, format, *args):
         pass
+
+    def do_GET(self):
+        if self.path.split("?")[0] == "/model.glb" and _QuietHandler.model_path:
+            data = _QuietHandler.model_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "model/gltf-binary")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        super().do_GET()
 
 
 class ViewerHub:
@@ -34,6 +47,7 @@ class ViewerHub:
         self._ws_server = None
         self._http_server: ThreadingHTTPServer | None = None
         self._snapshot: dict = {}  # last manifest/state event, replayed to new clients
+        self.on_message = None     # callback(dict) for requests from the viewer (e.g. machine picker)
 
     @property
     def url(self) -> str:
@@ -43,15 +57,26 @@ class ViewerHub:
     def has_clients(self) -> bool:
         return bool(self._clients)
 
-    async def start(self, manifest=None):
+    @staticmethod
+    def _manifest_event(manifest, library: list[str]) -> dict:
+        return {"type": "manifest", "name": manifest.name, "source": manifest.source,
+                "parts": [{"id": p.get("id"), "name": p.get("name")} for p in manifest.parts],
+                "library": library or [manifest.name]}
+
+    def set_manifest(self, manifest, library: list[str] | None = None):
+        """Switch machines: every viewer rebuilds its model."""
+        event = self._manifest_event(manifest, library or [])
+        _QuietHandler.model_path = getattr(manifest, "model_path", None)
+        for key in ("step",):
+            self._snapshot.pop(key, None)
+        self._snapshot["manifest"] = event
+        self.broadcast(event)
+
+    async def start(self, manifest=None, library: list[str] | None = None):
         self._loop = asyncio.get_running_loop()
         if manifest is not None:
-            self._snapshot["manifest"] = {
-                "type": "manifest",
-                "name": manifest.name,
-                "source": manifest.source,
-                "parts": [{"id": p.get("id"), "name": p.get("name")} for p in manifest.parts],
-            }
+            self._snapshot["manifest"] = self._manifest_event(manifest, library or [])
+            _QuietHandler.model_path = getattr(manifest, "model_path", None)
         self._ws_server = await websockets.serve(self._handle, self.host, self.ws_port)
         handler = functools.partial(_QuietHandler, directory=str(VIEWER_DIR))
         self._http_server = ThreadingHTTPServer((self.host, self.http_port), handler)
@@ -69,8 +94,13 @@ class ViewerHub:
         try:
             for event in self._snapshot.values():
                 await connection.send(json.dumps(event))
-            async for _ in connection:
-                pass
+            async for raw in connection:
+                try:
+                    message = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if self.on_message and isinstance(message, dict):
+                    self.on_message(message)
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -102,6 +132,9 @@ class ViewerHub:
 
 class RecordingHub:
     """Stand-in hub for tests: records events instead of sending them."""
+
+    def set_manifest(self, manifest, library=None):
+        self.broadcast(ViewerHub._manifest_event(manifest, library or []))
 
     def __init__(self, has_clients: bool = True):
         self.events: list[dict] = []

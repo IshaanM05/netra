@@ -14,12 +14,15 @@ import os
 import re
 import signal
 import time
+from pathlib import Path
 
 from .audio import AudioIO
 from .streaming import StreamingListener, Turn
 from .agent import AgentClient, _keyterms
 from .speculation import SpeculativeExecutor
 from .tools import tool_definitions, web_tools_enabled
+from .learn import MachineLearner
+from .sight import MachineLibrary
 from .viewer import ViewerHub
 from . import config
 
@@ -184,6 +187,37 @@ class NetraEngine:
             print(f"[engine] agent session ended. Say \"{config.WAKE_PHRASE}\" to start again.")
             self._emit({"type": "status", "state": "listening"})
 
+    # ---------- machine library ----------
+
+    def _on_machine_switch(self, manifest):
+        """ModelSight switched machines (from a tool call, the viewer picker or the learner)."""
+        print(f"[engine] machine → {manifest.name}")
+        if self._speculator:
+            self._speculator.cancel_all()
+        if self._agent:
+            self._schedule(self._agent.refresh_session(self._context()))
+
+    def _on_machine_learned(self, manifest):
+        self._sight.set_manifest(manifest)
+        if self._agent:
+            procedures = ", ".join(str(p.get("name")) for p in manifest.procedures[:3])
+            self._schedule(self._agent.announce(
+                f"You just finished learning the {manifest.name} from its manual and it's now on screen, "
+                f"with {len(manifest.parts)} parts and procedures like: {procedures}. Tell the user in one or "
+                "two short sentences and offer to show a part or walk through one."))
+
+    def _on_learn_failed(self, machine: str, reason: str):
+        if self._agent:
+            self._schedule(self._agent.announce(
+                f"Learning the {machine} failed ({reason}). Tell the user briefly that you couldn't find "
+                "enough in its manual online, and that you can still help with what's on screen."))
+
+    def _on_viewer_message(self, message: dict):
+        if message.get("type") == "load_machine" and self._sight is not None:
+            name = str(message.get("machine", ""))
+            result = self._sight.act("load_machine", {"machine": name})
+            print(f"[engine] viewer picked {name}: {result[:80]}")
+
     def _context(self) -> str:
         return self._streaming_listener.transcript.summary()
 
@@ -213,9 +247,21 @@ class NetraEngine:
         self._loop = asyncio.get_running_loop()
         manifest_sight = config.build_sight()
         if getattr(manifest_sight, "name", "") == "model":
+            manifests_dir = (manifest_sight.manifest.path or Path("manifests/x")).parent
+            library = MachineLibrary(manifests_dir)
+            current = library.find(manifest_sight.manifest.name) or manifest_sight.manifest
+            library.add(current)
+            manifest_sight.manifest = current
             self._hub = ViewerHub()
-            await self._hub.start(manifest_sight.manifest)
+            self._hub.on_message = self._on_viewer_message
+            await self._hub.start(current, library.names())
             manifest_sight.renderer = self._hub
+            manifest_sight.library = library
+            manifest_sight.on_switch = self._on_machine_switch
+            if web_tools_enabled():
+                manifest_sight.learner = MachineLearner(library, manifests_dir / "learned", self._hub,
+                                                        on_ready=self._on_machine_learned,
+                                                        on_failed=self._on_learn_failed)
         self._sight = manifest_sight
         self._speculator = SpeculativeExecutor(self._sight, self._hub)
 
