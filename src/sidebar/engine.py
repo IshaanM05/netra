@@ -17,7 +17,7 @@ import time
 
 from .audio import AudioIO
 from .streaming import StreamingListener, Turn
-from .agent import AgentClient
+from .agent import AgentClient, _keyterms
 from .speculation import SpeculativeExecutor
 from .tools import tool_definitions, web_tools_enabled
 from .viewer import ViewerHub
@@ -220,17 +220,12 @@ class NetraEngine:
         self._speculator = SpeculativeExecutor(self._sight, self._hub)
 
         self._audio.start(self._loop)
-        keyterms = []
         manifest = getattr(self._sight, "manifest", None)
-        if manifest:
-            for part in manifest.parts:
-                keyterms += [str(part.get("name")), *map(str, part.get("aliases", []))]
-            keyterms += [str(v.get("term")) for v in manifest.vocab]
         self._streaming_listener = StreamingListener(
             audio_queue=self._audio.subscribe_streaming(),
             on_partial_turn=self._on_partial_turn,
             on_final_turn=self._on_final_turn,
-            keyterms=list(dict.fromkeys(k for k in keyterms if k)),
+            keyterms=_keyterms(manifest) if manifest else [],
         )
 
         self._loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(self._shutdown()))

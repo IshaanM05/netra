@@ -69,7 +69,7 @@ def build_system_prompt(sight=None, web_enabled: bool = False, room_context: str
     return "\n\n".join(parts)
 
 
-SIGHT_KIND = os.environ.get("NETRA_SIGHT", "screen").strip().lower()
+SIGHT_KIND = os.environ.get("NETRA_SIGHT", "").strip().lower() or "screen"
 MANIFEST_PATH = os.environ.get("NETRA_MANIFEST", "").strip()
 
 

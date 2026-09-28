@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Automated test harness for Voice Agent API prompt/tool iteration.
+Audio-path smoke test: espeak-ng speech -> Voice Agent API -> utility tools (no Sight adapter).
 No voice playback — text responses and tool call verification only.
 """
 
@@ -11,12 +11,17 @@ import sys
 
 import numpy as np
 import websockets
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.sidebar.config import API_KEY, AGENT_WS_URL, DEFAULT_SYSTEM_PROMPT, DEFAULT_VOICE
-from src.sidebar.tools import TOOL_DEFINITIONS, execute_tool
+from src.sidebar.agent import build_session
+from src.sidebar.config import API_KEY, AGENT_WS_URL
+from src.sidebar.tools import execute_tool
 
 SAMPLE_RATE = 24_000
 
@@ -182,12 +187,7 @@ async def run_tests():
     async with websockets.connect(AGENT_WS_URL, additional_headers=headers) as ws:
         await ws.send(json.dumps({
             "type": "session.update",
-            "session": {
-                "system_prompt": DEFAULT_SYSTEM_PROMPT,
-                "greeting": "",
-                "output": {"voice": DEFAULT_VOICE},
-                "tools": TOOL_DEFINITIONS,
-            },
+            "session": build_session(None),
         }))
 
         # Wait for session.ready

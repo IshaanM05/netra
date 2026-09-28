@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 
 import websockets
@@ -24,8 +25,31 @@ import websockets
 from . import config
 from .tools import execute_tool, tool_definitions, web_tools_enabled
 
-_COMMON_WORDS = {"motor", "gears", "gear", "fins", "tip", "heater", "cartridge", "idler", "fan",
-                 "blower", "throat", "cold end", "print fan", "cooling fan", "clicking", "jam"}
+# Everyday words dilute the keyterm boost (AssemblyAI guidance); keep only distinctive ones.
+_COMMON_WORDS = {"motor", "gears", "gear", "drive", "fins", "tip", "heater", "cartridge", "fan", "blower",
+                 "throat", "cold", "end", "print", "cooling", "clicking", "jam", "lever", "tube", "sensor",
+                 "block", "heat", "sink", "break", "part", "layer", "door", "screw", "tension", "brass",
+                 "element", "feed", "temperature", "thermal", "temp", "stepper", "arm", "assembly",
+                 "planetary", "under", "extrusion", "stringing", "pull", "heating", "runaway"}
+
+
+def _keyterms(manifest) -> list[str]:
+    explicit = [str(t) for t in getattr(manifest, "keyterms", []) or []]
+    words = []
+    for part in manifest.parts:
+        for phrase in [part.get("name"), *part.get("aliases", [])]:
+            words += re.findall(r"[A-Za-z0-9]+", str(phrase))
+    for entry in manifest.vocab:
+        words += re.findall(r"[A-Za-z0-9]+", str(entry.get("term", "")))
+    words += re.findall(r"[A-Za-z0-9]+", manifest.name)
+    distinctive = [w for w in words if len(w) >= 4 and w.lower() not in _COMMON_WORDS] + \
+                  [w for w in words if w.isupper() and len(w) >= 2]
+    seen, out = set(), []
+    for term in ["Netra", *explicit, *distinctive]:
+        if term.lower() not in seen:
+            seen.add(term.lower())
+            out.append(term)
+    return out[:100]
 
 
 def build_session(sight=None, room_context: str = "") -> dict:
@@ -38,14 +62,9 @@ def build_session(sight=None, room_context: str = "") -> dict:
     }
     manifest = getattr(sight, "manifest", None)
     if manifest is not None:
-        terms = ["Netra"]
-        for part in manifest.parts:
-            terms += [str(part.get("name")), *map(str, part.get("aliases", []))]
-        terms += [str(v.get("term")) for v in manifest.vocab]
-        terms = [t for t in dict.fromkeys(terms) if t and t.lower() not in _COMMON_WORDS]
         parts = ", ".join(str(p.get("name")) for p in manifest.parts)
         session["input"] = {
-            "keyterms": terms[:100],
+            "keyterms": _keyterms(manifest),
             "transcription_prompt": (
                 f"Someone working hands-on with a {manifest.name}, talking to a voice assistant "
                 f"named Netra. They name parts such as {parts}, and describe problems like "

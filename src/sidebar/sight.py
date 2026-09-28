@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import platform
 import re
@@ -34,7 +35,31 @@ def _normalize(text: str) -> str:
 
 def _contains_phrase(normalized_text: str, phrase: str) -> bool:
     phrase = _normalize(phrase)
-    return len(phrase.strip()) > 0 and phrase in normalized_text
+    if not phrase.strip():
+        return False
+    if phrase in normalized_text:
+        return True
+    # STT splits and joins compounds ("hot end fan" / "hotend fan"): compare without spaces
+    # for phrases long enough not to collide inside other words.
+    compact = phrase.replace(" ", "")
+    return len(compact) >= 6 and compact in normalized_text.replace(" ", "")
+
+
+def _fuzzy_score(normalized_text: str, phrase: str) -> float:
+    """Best similarity between phrase and any same-length run of words in the text (STT typos)."""
+    target = _normalize(phrase).strip()
+    words = normalized_text.split()
+    n = len(target.split())
+    if len(target.replace(" ", "")) < 5 or not words:
+        return 0.0
+    best = 0.0
+    for size in {max(1, n - 1), n, n + 1}:
+        for i in range(0, max(1, len(words) - size + 1)):
+            chunk, goal = "".join(words[i:i + size]), target.replace(" ", "")
+            if abs(len(chunk) - len(goal)) > 0.2 * len(goal):
+                continue  # "heat" is not a typo of "heater"
+            best = max(best, difflib.SequenceMatcher(None, chunk, goal).ratio())
+    return best
 
 
 @dataclass
@@ -46,6 +71,7 @@ class Manifest:
     vocab: list[dict[str, str]] = field(default_factory=list)
     procedures: list[dict[str, Any]] = field(default_factory=list)
     base_dir: Path | None = None
+    keyterms: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, filename: str | Path) -> "Manifest":
@@ -77,7 +103,8 @@ class Manifest:
             raise ValueError("manifest.procedures must be a list of mappings.")
         if domain == "physical_machine" and not parts:
             raise ValueError("physical_machine manifests require at least one part.")
-        return cls(domain, name.strip(), source, parts, vocab, procedures, path.parent)
+        keyterms = [str(t) for t in data.get("keyterms", []) or []]
+        return cls(domain, name.strip(), source, parts, vocab, procedures, path.parent, keyterms)
 
     @property
     def model_path(self) -> Path | None:
@@ -152,7 +179,7 @@ class ModelSight:
         for part in self.manifest.parts:
             for phrase in self._phrases(part):
                 if _contains_phrase(text, phrase):
-                    score = 100 + len(phrase)
+                    score = 100 + len(phrase.replace(" ", ""))
                     if not best or score > best[0]:
                         best = (score, part)
         by_id = {str(p.get("id")): p for p in self.manifest.parts}
@@ -165,6 +192,10 @@ class ModelSight:
                     best = (score, target)
         if best:
             return best[1]
+        fuzzy = max(((max(_fuzzy_score(text, ph) for ph in self._phrases(part)), part)
+                     for part in self.manifest.parts), key=lambda item: item[0])
+        if fuzzy[0] >= 0.74:
+            return fuzzy[1]
         terms = _tokens(query)
         ranked = []
         for part in self.manifest.parts:

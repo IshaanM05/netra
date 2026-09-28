@@ -59,7 +59,7 @@ class StreamingListener:
         keyterms: list[str] | None = None,
     ):
         self._audio_queue = audio_queue
-        self._keyterms = ["Netra", "Hey Netra", *(keyterms or [])][:100]
+        self._keyterms = list(dict.fromkeys(["Netra", "Hey Netra", *(keyterms or [])]))[:100]
         self._on_partial_turn = on_partial_turn
         self._on_final_turn = on_final_turn
         self._transcript = RoomTranscript()

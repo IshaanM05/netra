@@ -4,11 +4,11 @@ Text-mode evaluation harness for Netra's Voice Agent API configuration.
 
 Each scenario opens a real Voice Agent API session with the exact session config
 the live app uses (agent.build_session), injects user turns as text
-(conversation.message + reply.create — no TTS, no audio playback), runs the real
+(reply.create instructions — no TTS, no audio playback), runs the real
 tools against the real manifest with a recording viewer hub, and checks which
 tools were called, with what arguments, and what the viewer was told to show.
 
-    python tests/eval_agent.py                 # all scenarios, 3 in parallel
+    python tests/eval_agent.py -j 6            # all scenarios, 6 sessions in parallel
     python tests/eval_agent.py -k clicking     # scenarios whose name contains 'clicking'
     python tests/eval_agent.py --debug -k heat # print every event
 """
@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT))
 from src.sidebar import config  # noqa: E402
 from src.sidebar.agent import build_session  # noqa: E402
 from src.sidebar.sight import Manifest, ModelSight  # noqa: E402
-from src.sidebar.tools import execute_tool  # noqa: E402
+from src.sidebar.tools import execute_tool, web_tools_enabled  # noqa: E402
 from src.sidebar.viewer import RecordingHub  # noqa: E402
 
 MANIFEST = ROOT / "manifests" / "sample-machine.yaml"
@@ -106,7 +106,55 @@ SCENARIOS: list[Scenario] = [
     S("calculate", ("If I print at 12 millimetres per second for 90 seconds, how far is that?", Expect("calculate"))),
     # ---- should NOT call a visual tool
     S("chit chat", ("Thanks, that's really helpful.", Expect(None))),
+
+    # ---- speech-to-text noise the agent will really receive
+    S("stt heat brake", ("where's the heat brake", Expect("locate", part="heatbreak"))),
+    S("stt thermister", ("show me the thermister", Expect("locate", part="thermistor", any_of=("point",)))),
+    S("stt no punctuation procedure", ("um my extruder is making this clicking noise what do i do",
+                                       Expect("walk_through", procedure="clicking", step=1))),
+    # ---- descriptive / indirect references
+    S("red wires", ("What are those red wires going into the block?",
+                    Expect("locate", part="heater_cartridge", any_of=("describe",)))),
+    S("thing that pushes filament", ("Which part actually pushes the filament down?",
+                                     Expect("locate", part="gearbox", any_of=("describe",)))),
+    # ---- safety must be spoken first for hot parts
+    S("safety nozzle", ("I want to touch the nozzle, where is it?",
+                        Expect("locate", part="nozzle", say=("hot", "cool", "burn", "careful")))),
+    # ---- procedure navigation
+    S("procedure go back",
+      ("Walk me through replacing the nozzle.", Expect("walk_through", procedure="nozzle", step=1)),
+      ("Next.", Expect("walk_through", procedure="nozzle", step=2)),
+      ("Sorry, go back one step.", Expect("walk_through", procedure="nozzle", step=1))),
+    S("procedure repeat",
+      ("How do I do a cold pull?", Expect("walk_through", procedure="cold pull", step=1)),
+      ("Can you repeat that?", Expect("walk_through", procedure="cold pull", step=1, any_of=())),),
+    S("switch procedure",
+      ("My extruder keeps clicking.", Expect("walk_through", procedure="clicking", step=1)),
+      ("Actually forget that, I have a thermal runaway error.", Expect("walk_through", procedure="temperature", step=1))),
+    # ---- view control
+    S("explode then locate then reset",
+      ("Explode the assembly.", Expect("expand")),
+      ("Now where's the thermistor in there?", Expect("locate", part="thermistor")),
+      ("Reset the view.", Expect("reset_view"))),
+    # ---- not in the manifest and no web search: must not invent a part
+    S("unknown part", ("Where's the Z axis motor?", Expect("locate", any_of=("describe",)))),
 ]
+
+# Live web grounding (Anakin). Only run when ANAKIN_API_KEY is set.
+WEB_SCENARIOS: list[Scenario] = [
+    S("web official guide", ("Look up the official Prusa guide for a clogged nozzle on the MK4.",
+                             Expect("search_live"))),
+    S("web spec not in manifest", ("What nozzle diameter does the MK4 ship with by default?",
+                                   Expect("search_live"))),
+    S("web error code", ("My MK4 is showing a thermal runaway error code, what does the Prusa knowledge base say?",
+                         Expect("search_live", any_of=("walk_through",)))),
+    S("web then manifest",
+      ("Search for the torque spec when tightening an MK4 nozzle.", Expect("search_live")),
+      ("Okay, and where is the nozzle on this one?", Expect("locate", part="nozzle"))),
+]
+
+# Repair-free chit-chat and other turns where a spoken "repeat" may reasonably be answered from
+# memory are kept strict on purpose: the viewer should always reflect what Netra is saying.
 
 
 # ---------------------------------------------------------------- runner
@@ -134,6 +182,7 @@ class TurnResult:
     reply: str = ""
     events: list[dict] = field(default_factory=list)
     seconds: float = 0.0
+    first_tool_s: float | None = None
     ok: bool = False
     why: str = ""
 
@@ -194,6 +243,8 @@ class Session:
                 if isinstance(args, str):
                     args = json.loads(args or "{}")
                 result.tools.append((msg["name"], args))
+                if result.first_tool_s is None:
+                    result.first_tool_s = time.monotonic() - started
                 output = await asyncio.to_thread(execute_tool, msg["name"], args, self.sight)
                 pending.append((msg["call_id"], output))
                 outstanding += 1
@@ -275,7 +326,8 @@ async def run_scenario(scn: Scenario, sem: asyncio.Semaphore, debug: bool) -> li
         for r in results:
             tools = ", ".join(f"{n}({json.dumps(a)})" for n, a in r.tools) or "-"
             flag = "  " if r.ok else "✗ "
-            print(f"   {flag}{r.user!r} [{r.seconds:.1f}s] → {tools}")
+            tool_at = f"tool@{r.first_tool_s * 1000:.0f}ms" if r.first_tool_s is not None else "no tool"
+            print(f"   {flag}{r.user!r} [{tool_at}, turn {r.seconds:.1f}s] → {tools}")
             print(f"      \"{r.reply[:140]}\"" + (f"   <-- {r.why}" if not r.ok else ""))
         return results
 
@@ -291,17 +343,22 @@ async def main():
 
     global INJECT
     INJECT = args.inject
-    scenarios = [s for s in SCENARIOS if args.k.lower() in s.name.lower()] * args.repeat
+    pool = SCENARIOS + (WEB_SCENARIOS if web_tools_enabled() else [])
+    if not web_tools_enabled():
+        print("(ANAKIN_API_KEY not set: skipping web scenarios)")
+    scenarios = [s for s in pool if args.k.lower() in s.name.lower()] * args.repeat
     sem = asyncio.Semaphore(args.j)
     started = time.monotonic()
     all_results = await asyncio.gather(*(run_scenario(s, sem, args.debug) for s in scenarios))
     turns = [r for rs in all_results for r in rs]
     passed_turns = sum(r.ok for r in turns)
     passed_scn = sum(all(r.ok for r in rs) and len(rs) == len(s.turns) for rs, s in zip(all_results, scenarios))
-    latencies = sorted(r.seconds for r in turns if r.ok)
-    p50 = latencies[len(latencies) // 2] if latencies else 0
+    tool_lat = sorted(r.first_tool_s for r in turns if r.first_tool_s is not None)
+    p50 = tool_lat[len(tool_lat) // 2] if tool_lat else 0
+    p90 = tool_lat[int(len(tool_lat) * 0.9)] if tool_lat else 0
     print(f"\n{'=' * 64}\n  scenarios {passed_scn}/{len(scenarios)}   turns {passed_turns}/{len(turns)}"
-          f"   p50 turn {p50:.1f}s   wall {time.monotonic() - started:.0f}s\n{'=' * 64}")
+          f"   request→tool.call p50 {p50 * 1000:.0f}ms p90 {p90 * 1000:.0f}ms"
+          f"   wall {time.monotonic() - started:.0f}s\n{'=' * 64}")
     return 0 if passed_scn == len(scenarios) else 1
 
 
